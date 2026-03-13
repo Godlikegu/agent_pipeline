@@ -1,0 +1,56 @@
+models:
+ "gemini-3-pro-preview":
+   api_type: "openai"  # or azure / ollama / groq etc.
+   base_url: "https://api.whatai.cc/v1"
+   api_key: "sk-l9Bz6YoNYxaLrVPdPhdhHTvQVOElJoGfncnipg0U0C5aqLzy"
+   temperature: 0.7
+ "qwen3-coder-480b-a35b-instruct":
+   api_type: "openai"  # or azure / ollama / groq etc.
+   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+   api_key: "sk-f99cec8c420c4de3a11d7bf8b579d6e0"
+   temperature: 0.7
+ "qwen3-max":
+   api_type: "openai"  # or azure / ollama / groq etc.
+   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+   api_key: "sk-f99cec8c420c4de3a11d7bf8b579d6e0"
+   temperature: 0.7
+ "deepseek-v3.2":
+   api_type: "openai"  # or azure / ollama / groq etc.
+   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+   api_key: "sk-f99cec8c420c4de3a11d7bf8b579d6e0"
+   temperature: 0.7
+ "glm-4.7":
+   api_type: "openai"  # or azure / ollama / groq etc.
+   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+   api_key: "sk-f99cec8c420c4de3a11d7bf8b579d6e0"
+   temperature: 0.7
+ "kimi-k2-250905":
+   api_type: "openai"  # or azure / ollama / groq etc.
+   base_url: "https://api.whatai.cc/v1"
+   api_key: "sk-l9Bz6YoNYxaLrVPdPhdhHTvQVOElJoGfncnipg0U0C5aqLzy"
+   temperature: 0.7
+ "gpt-5.2-thinking":
+   api_type: "openai"  # or azure / ollama / groq etc.
+   base_url: "https://api.whatai.cc/v1"
+   api_key: "sk-l9Bz6YoNYxaLrVPdPhdhHTvQVOElJoGfncnipg0U0C5aqLzy"
+   temperature: 0.7
+ "claude-opus-4-5-20251101-thinking":
+   api_type: "openai"  # or azure / ollama / groq etc.
+   base_url: "https://api.whatai.cc/v1"
+   api_key: "sk-l9Bz6YoNYxaLrVPdPhdhHTvQVOElJoGfncnipg0U0C5aqLzy"
+   temperature: 0.7
+ "grok-4":
+   api_type: "openai"  # or azure / ollama / groq etc.
+   base_url: "https://api.whatai.cc/v1"
+   api_key: "sk-l9Bz6YoNYxaLrVPdPhdhHTvQVOElJoGfncnipg0U0C5aqLzy"
+   temperature: 0.7
+ "gemini-3-flash-preview-thinking-*":
+   api_type: "openai"  # or azure / ollama / groq etc.
+   base_url: "https://api.whatai.cc/v1"
+   api_key: "sk-l9Bz6YoNYxaLrVPdPhdhHTvQVOElJoGfncnipg0U0C5aqLzy"
+   temperature: 0.7
+ "cds/Claude-4.6-opus":
+    api_type: "openai"  # or azure / ollama / groq etc.
+    base_url: "https://ai-gateway-internal.dp.tech/v1"
+    api_key: "sk-Zj3a7RQDVCXr-Axg-0gtkg"
+    temperature: 0.7
