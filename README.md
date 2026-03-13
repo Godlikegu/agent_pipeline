@@ -5,6 +5,100 @@
 
 ---
 
+## 工作流与模块调用关系
+
+### 1. 整体工作流程图
+
+```
+配置文件 (YAML)
+    │
+    ▼
+  run_task.py ──── 对每个任务 ───-─┐
+    │                             │
+    ▼                             ▼
+创建 Workflow ────────> InverseProblemWorkflow.run()
+(传入 skill_manager        │
+引用，不预注入知识)         ├─── 0. Phase 0 准备（沙箱 + 数据生成 + 评估脚本）
+                          ├─── 1. 规划器 → 数学方案（Critic 审查）
+                          │       ↑ 每个 Agent 调用前通过
+                          │         _build_context_with_memory()
+                          │         独立检索并注入分层知识
+                          ├─── 2. 架构师 → 代码骨架
+                          ├─── 3. 编码器 → 完整实现
+                          │       (imports → init → methods → main)
+                          ├─── 4. 执行 (subprocess) + 评估
+                          ├─── 5. 评审官 → 通过/失败 + 诊断
+                          │       │
+                          │       ├─ 通过 → 蒸馏知识（实例+经验）
+                          │       └─ 失败 → 修复工单 → ticket 调度
+                          │              │  → Coder/Architect/Planner
+                          │              └─ 最终失败 → 仅蒸馏经验
+                          │
+                          ▼
+                    报告生成 (JSON)
+```
+
+整体可以理解为：
+
+- **外层调度**：`run_task.py` 负责“读配置 + 循环所有任务”。  
+- **任务内主循环**：`core/workflow.py` / `core/workflow_base.py` 负责一次完整的「规划 → 设计 → 写代码 → 运行 → 评估 → 失败重试」。  
+- **环境与执行**：`core/sandbox.py` / `core/executor.py` 在 `sandbox_root` 下搭建隔离环境并真正执行 `solver.py` / `eval_script.py`。  
+- **智能决策**：`agents/*.py` 是一组不同角色的 Agent，包装了对 LLM 的调用逻辑。  
+- **工具层**：`utils/*.py` 提供通用工具，如配置加载、文本解析、代码编辑、最终报告等。
+
+### 2. 代码结构总览
+
+项目主要目录结构（省略部分细节）：
+
+```text
+pipeline/
+  run_task.py           # 入口脚本（python -m run_task）
+  run.sh                # 示例运行脚本（后台 + 重定向日志）
+  README.md             # 使用文档（本文件）
+
+  config/
+    default.yaml        # 主配置：路径、pipeline 参数、skills 等
+    llm.yaml            # LLM 列表与网关配置
+    tasks/
+      debug_tasks.yaml  # 调试任务列表
+      train_tasks.yaml  # 训练/大规模任务列表
+      test_tasks.yaml   # 测试/评测任务列表
+
+  core/
+    __init__.py
+    workflow_base.py    # InverseProblemBase，管理 sandbox / agent / 配置 / 日志等公共逻辑
+    workflow.py         # InverseProblemWorkflow，具体“多轮迭代 + 执行 + 评估”的主流程
+    sandbox.py          # sandbox 目录搭建与 run_cmd（子进程执行 solver.py / eval_script.py）
+    executor.py         # Phase 0（数据生成 + 评估脚本生成）相关逻辑
+
+  agents/
+    __init__.py
+    base.py             # BaseAgent，封装通用的 LLM 调用逻辑与 prompt 组装
+    planner.py          # PlannerAgent，负责从任务描述出发规划整体求解思路
+    architect.py        # ArchitectAgent，根据 plan 生成代码骨架（class InverseSolver 框架）
+    coder.py            # CoderAgent，根据骨架和反馈生成/修复 solver.py 代码
+    judge.py            # JudgeAgent，分析运行/评估结果，给出错误分析与改进建议
+    sandbox_agents.py   # DataGenAgent / EvalGenAgent，用于生成 data_gen.py 和 eval_script.py
+
+  utils/
+    __init__.py
+    config_loader.py    # 统一加载 default.yaml + 可选覆盖配置
+    llm_client.py       # 创建 OpenAI 兼容客户端（封装 base_url/api_key/model_name）
+    text_utils.py       # 从 LLM 输出中抽取 JSON / Python 代码等工具
+    code_editor.py      # 对现有代码做 patch / merge 的工具逻辑
+    reporter.py         # ExecutionReporter，聚合多任务结果并导出 JSON 报告
+
+  data/                 # 运行时使用的数据、技能数据库等
+  reports/              # 运行结束后的汇总报告（execution_report_*.json 等）
+  tests/                # 单元测试与集成测试
+  (TODO) code_cleaner/         # 从github raw code清洗为标准code
+  (TODO) prompt_optimizer/     # Prompt/技能相关的优化组件，使用textgrad优化
+  (TODO) task_gen/             # 直接从paper和user_prompt生成task_description，无需code
+  (TODO) skills/               # （可选）技能系统与知识库，实现跨任务经验复用,目前使用的是Jiahe开发的老版本
+```
+
+---
+
 ## 环境配置
 
 ### 1. 系统与基础依赖
@@ -63,20 +157,27 @@ models:
 关键字段说明（常用的几项）：
 
 - **paths**
-  - `task_descriptions_dir`：任务描述 markdown 存放目录。
-  - `sandbox_root`：所有任务运行时的 sandbox 根目录，workflow 会在此目录下为每个任务创建独立子目录。
+  - `task_descriptions_dir`：任务描述 markdown 存放目录（例如 `/data/.../task_descriptions`）。
+  - `sandbox_root`：所有任务运行时的 sandbox 根目录，**所有自动生成的代码 / 数据 / 日志都在这里**。  
+    - 每个任务会在该目录下创建独立子目录：`{sandbox_root}/{task_name}_sandbox/`。
+  - `skills_db`：技能系统使用的 SQLite 数据库路径（默认 `./data/skills.db`）。
 - **pipeline**
-  - `max_retries`：主循环最大重试次数。
+  - `max_retries`：主循环最大重试次数（Planner/Architect/Coder 的大循环）。
   - `execution_timeout`：`solver.py` 执行超时时间（秒）。
   - `data_gen_timeout`：数据生成脚本 `data_gen.py` 超时。
   - `syntax_check_timeout`：语法检查（`py_compile`）超时。
+  - `gt_code_snippet_limit`：注入给 LLM 的 GT 代码截断长度（字符数）。
+  - `code_size_guard`：生成代码的长度上限，防止无限膨胀。
 - **evaluation**
   - `min_guaranteed_psnr`：PSNR 最低保证阈值。
   - `baseline_ratio`：基线 PSNR 的比例系数，最终阈值为 `max(baseline_psnr * ratio, min_guaranteed_psnr)`。
-- **skills**
-  - `enabled`：是否启用技能系统（知识库）。
-  - `mode`：技能注入模式。
-  - `retrieval` / `credit` / `embedding`：控制知识检索与打分的详细参数。
+- **skills（重要）**
+  - `enabled`：是否启用技能系统（知识库），**默认是 `false`，即整个 Skills 系统默认关闭**。  
+    - 如需启用，请改为 `true`，并确保 `skills_db` / `embedding_model_dir` 等路径可用。
+  - `mode`：技能注入模式，`"default" | "none" | "instance" | "experience" | "instance_exp"`。
+  - `retrieval`：控制一次检索多少条经验、相似度阈值、token 预算等。
+  - `credit`：经验条目的信用分更新策略（成功涨分，失败降分，低于阈值自动归档）。
+  - `embedding`：技能检索使用的向量模型名称与维度。
 
 ---
 
