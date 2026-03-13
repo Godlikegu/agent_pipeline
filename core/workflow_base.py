@@ -21,7 +21,7 @@ from .sandbox import setup_sandbox, run_cmd, reset_sandbox_to_phase0_state
 from .executor import phase_0_preparation, load_data_shapes
 
 class InverseProblemBase:
-    def __init__(self, task_name: str, task_desc: str, gt_code_path: str, python_path: str, working_dir: str, client: Any, model_name: str, config: dict = None, root_output_dir: str = None, skill_manager: Any = None, max_retries: int = None):
+    def __init__(self, task_name: str, task_desc: str, gt_code_path: str, python_path: str, client: Any, model_name: str, config: dict = None, root_output_dir: str = None, skill_manager: Any = None, max_retries: int = None):
         self.task_name = task_name
         self.task_desc = task_desc
         self.gt_code_path = gt_code_path
@@ -36,7 +36,6 @@ class InverseProblemBase:
         paths_cfg = self.config.get('paths', {})
 
         # Directory structure
-        self.root_dir = os.path.abspath(working_dir)
         _root_output = root_output_dir or paths_cfg.get('sandbox_root', '/data/yjh/end_sandbox')
         self.sandbox_dir = os.path.join(_root_output, f"{task_name}_sandbox")
 

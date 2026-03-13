@@ -12,8 +12,8 @@ from .workflow_base import InverseProblemBase
 from utils.text_utils import extract_json, extract_python
 
 class InverseProblemWorkflow(InverseProblemBase):
-    def __init__(self, task_name: str, task_desc: str, gt_code_path: str, python_path: str, working_dir: str, client: Any, model_name: str, config: dict = None, root_output_dir: str = None, skill_manager: Any = None, max_retries: int = None):
-        super().__init__(task_name, task_desc, gt_code_path, python_path, working_dir, client, model_name, config, root_output_dir, skill_manager, max_retries)
+    def __init__(self, task_name: str, task_desc: str, gt_code_path: str, python_path: str, client: Any, model_name: str, config: dict = None, root_output_dir: str = None, skill_manager: Any = None, max_retries: int = None):
+        super().__init__(task_name, task_desc, gt_code_path, python_path, client, model_name, config, root_output_dir, skill_manager, max_retries)
 
     def run(self):
         from .sandbox import setup_sandbox
@@ -890,6 +890,5 @@ if __name__ == "__main__":
         task_desc="Recover a 64x64 image from 50% randomly missing pixels. Use ADMM.",
         gt_code_path="./gt_repo",
         python_path="/usr/bin/python3",
-        working_dir="./workspace_run_1"
     )
     workflow.run()
