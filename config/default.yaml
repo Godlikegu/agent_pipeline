@@ -62,3 +62,19 @@ agents:
     temperature: 0.7
   teacher:
     temperature: 0.2
+
+# ========== Task Generation ==========
+task_gen:
+  default_user_prompt: ""
+  generator:
+    system_prompt_path: "./task_gen/prompts/task_generator_system.txt"
+    temperature: 0.2
+    max_tokens: 16000
+    max_loops: 3
+    paper_markdown_char_limit: 40000
+  pdf_parser:
+    backend: "direct_paddleocr"       # "external_script" | "direct_paddleocr"
+    ocr_python_path: ""              # Optional dedicated Python for OCR
+    ocr_script_path: ""              # External OCR script, e.g. run_ocr.py
+    output_dir: "./data/paper_markdown"
+    timeout: 1800
