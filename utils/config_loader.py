@@ -4,8 +4,6 @@ utils/config_loader.py — 配置加载工具
 加载 config/default.yaml，支持通过 override_path 覆盖部分配置。
 提供 cfg() 辅助函数用于点号路径取值。
 """
-import os
-import yaml
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +21,8 @@ def load_config(override_path: str = None) -> dict:
     Returns:
         合并后的配置字典。
     """
+    import yaml
+
     with open(_DEFAULT_CONFIG_PATH, encoding='utf-8') as f:
         config = yaml.safe_load(f)
 

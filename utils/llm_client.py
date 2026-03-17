@@ -4,8 +4,6 @@ utils/llm_client.py — LLM 客户端工厂
 统一封装 OpenAI 兼容客户端的创建逻辑，
 支持任何与 OpenAI API 兼容的后端（Anthropic、DeepSeek 等）。
 """
-from openai import OpenAI
-
 
 def create_client(llm_config: dict, model_key: str) -> tuple:
     """
@@ -32,6 +30,8 @@ def create_client(llm_config: dict, model_key: str) -> tuple:
             f"Model '{model_key}' not found in LLM config. "
             f"Available: {list(llm_config.get('models', {}).keys())}"
         )
+
+    from openai import OpenAI
 
     model_conf = llm_config['models'][model_key]
     # 若配置未显式指定 model_name，则用 model_key 作为 API 请求的模型名
