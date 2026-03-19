@@ -5,7 +5,6 @@
 
 # ========== 路径配置 ==========
 paths:
-  task_descriptions_dir: "/data/yjh/task_descriptions"
   sandbox_root: "/data/guyuxuan/agent/end_sandbox"
   skills_db: "./data/skills.db"
   embedding_model_dir: "./skills/embeddings/all-MiniLM-L6-v2"
@@ -65,16 +64,11 @@ agents:
 
 # ========== Task Generation ==========
 task_gen:
-  default_user_prompt: ""
+  default_user_prompt: "Read the paper markdown and generate a detailed task_description for the inverse-problem pipeline, including problem formulation, input/output constraints, reconstruction strategy, evaluation expectations, and implementation cautions."
+  paper_markdown_dir: "./data/paper_markdown"
   generator:
-    system_prompt_path: "./task_gen/prompts/task_generator_system.txt"
-    temperature: 0.2
+    system_prompt_path: "./agents/prompts/task_generator_system.txt"
+    temperature: 0.0
     max_tokens: 16000
     max_loops: 3
     paper_markdown_char_limit: 40000
-  pdf_parser:
-    backend: "direct_paddleocr"       # "external_script" | "direct_paddleocr"
-    ocr_python_path: ""              # Optional dedicated Python for OCR
-    ocr_script_path: ""              # External OCR script, e.g. run_ocr.py
-    output_dir: "./data/paper_markdown"
-    timeout: 1800
