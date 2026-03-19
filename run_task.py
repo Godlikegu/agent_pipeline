@@ -23,18 +23,78 @@ from utils.llm_client import create_client
 from core.workflow import InverseProblemWorkflow
 from skills import create_skill_manager
 from utils.reporter import ExecutionReporter
+from agents.task_generator import DEFAULT_USER_PROMPT, TaskGeneratorAgent
 
 
-def load_task_description(task_name: str, task_descriptions_dir: str) -> str:
-    """加载任务描述，支持降级策略。"""
-    desc_path = Path(task_descriptions_dir) / f"{task_name}_description.md"
-    if desc_path.exists():
-        print(f"  ✓ Loading task description from: {desc_path}")
-        with open(desc_path, "r", encoding='utf-8') as f:
-            return f.read()
-    else:
-        print(f"  ⚠ Warning: Task description not found at {desc_path}. Using default.")
-        return f"Recover the signal from noisy measurements using a physics-based inverse solver. Task: {task_name}"
+def _read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _resolve_paper_markdown_path(task_info: dict, config: dict) -> Optional[Path]:
+    explicit_path = task_info.get("paper_markdown_path")
+    if explicit_path:
+        return Path(explicit_path).expanduser().resolve()
+
+    default_dir = config.get("task_gen", {}).get("paper_markdown_dir")
+    if default_dir:
+        candidate = Path(default_dir).expanduser().resolve() / f"{task_info['name']}.md"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def load_task_description(
+    task_info: dict,
+    config: dict,
+    client: OpenAI,
+    model_name: str,
+) -> str:
+    """Load an explicit task description or generate one from paper markdown."""
+    explicit_desc_path = task_info.get("task_description_path")
+    if explicit_desc_path:
+        desc_path = Path(explicit_desc_path).expanduser().resolve()
+        if not desc_path.exists():
+            raise FileNotFoundError(f"task_description_path not found: {desc_path}")
+        print(f"  ✓ Loading task description from explicit path: {desc_path}")
+        return _read_text(desc_path)
+
+    paper_markdown_path = _resolve_paper_markdown_path(task_info, config)
+    if paper_markdown_path is None:
+        raise FileNotFoundError(
+            "No task_description_path was provided, and no paper markdown could be found. "
+            "Please provide task_description_path or paper_markdown_path."
+        )
+    if not paper_markdown_path.exists():
+        raise FileNotFoundError(f"Paper markdown not found: {paper_markdown_path}")
+
+    task_gen_cfg = config.get("task_gen", {})
+    user_prompt = (
+        task_info.get("user_prompt")
+        or task_gen_cfg.get("default_user_prompt")
+        or DEFAULT_USER_PROMPT
+    )
+    default_desc_dir = config.get("paths", {}).get(
+        "task_descriptions_dir", "./data/task_descriptions"
+    )
+    output_path = Path(
+        task_info.get("task_description_output_path")
+        or (Path(default_desc_dir) / f"{task_info['name']}_description.md")
+    ).expanduser().resolve()
+
+    generator = TaskGeneratorAgent.from_config(
+        client=client,
+        model_name=model_name,
+        config=config,
+    )
+
+    print(f"  ✓ Generating task description from markdown: {paper_markdown_path}")
+    result = generator.generate_from_markdown_path(
+        markdown_path=paper_markdown_path,
+        user_prompt=user_prompt,
+        save_path=output_path,
+    )
+    print(f"  ✓ Generated task description saved to: {result.task_description_path}")
+    return result.task_description
 
 
 def run_single_task(
@@ -47,7 +107,6 @@ def run_single_task(
 ) -> Dict[str, any]:
     """执行单个任务并返回结构化结果。"""
     task_name = task_info['name']
-    task_descriptions_dir = config['paths']['task_descriptions_dir']
     start_time = time.time()
 
     print(f"\n{'='*60}")
@@ -57,7 +116,12 @@ def run_single_task(
     print(f"  Python Path  : {task_info.get('python_path', 'default')}")
 
     try:
-        task_description = load_task_description(task_name, task_descriptions_dir)
+        task_description = load_task_description(
+            task_info=task_info,
+            config=config,
+            client=client,
+            model_name=model_name,
+        )
 
         workflow = InverseProblemWorkflow(
             task_name=task_name,

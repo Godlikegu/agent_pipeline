@@ -157,7 +157,6 @@ models:
 关键字段说明（常用的几项）：
 
 - **paths**
-  - `task_descriptions_dir`：任务描述 markdown 存放目录（例如 `/data/.../task_descriptions`）。
   - `sandbox_root`：所有任务运行时的 sandbox 根目录，**所有自动生成的代码 / 数据 / 日志都在这里**。  
     - 每个任务会在该目录下创建独立子目录：`{sandbox_root}/{task_name}_sandbox/`。
   - `skills_db`：技能系统使用的 SQLite 数据库路径（默认 `./data/skills.db`）。
@@ -190,6 +189,7 @@ tasks:
   - gt_code_path: /path/to/sim_code.py
     name: sim
     python_path: /path/to/conda/envs/sim/bin/python
+    task_description_path: /path/to/task_description.md   # 可选，直接指定任务描述文件
 
   - gt_code_path: /path/to/bpm_code.py
     name: bpm
@@ -202,6 +202,7 @@ tasks:
 - **name**：任务名称，用于筛选与日志标识（如 `--task-filter sim`）。
 - **python_path**：执行该任务时使用的 Python 解释器路径（例如另一 conda 环境）。  
   - 如果留空，代码会回退为当前运行 `run_task.py` 的 Python。
+- **task_description_path**：可选。直接指定任务描述 md 文件路径；若不提供，则需提供 `paper_markdown_path` 由 LLM 生成。
 
 `train_tasks.yaml` / `test_tasks.yaml` 的结构与此类似，只是具体任务列表不同。
 
@@ -286,7 +287,7 @@ tail -f reports/log/run_task_sim.log   # 实时查看日志
 - **Q：为什么 `nvidia-smi` 看不到任务？**  
 A：当前 pipeline 默认生成的是 CPU 代码（主要依赖 `numpy` 等），只有当 GT / 生成的 `solver.py` 主动使用 `torch.cuda` / `to("cuda")` 等 GPU API 时，进程才会出现在 `nvidia-smi` 中。
 - **Q：如何修改为自己的任务？**  
-A：在 `config/tasks/*.yaml` 中新增条目，指定自己的 `gt_code_path` 与 `python_path`，并在 `task_descriptions_dir` 下为对应 `name` 提供一份 `<name>_description.md` 即可。
+A：在 `config/tasks/*.yaml` 中新增条目，指定 `gt_code_path`、`python_path`，以及 `task_description_path`（任务描述 md 文件）或 `paper_markdown_path`（由 LLM 从论文生成任务描述）。
 - **Q：如何切换不同大模型？**  
 A：在 `config/llm.yaml` 中新增 / 修改某个模型配置，然后在命令行通过 `--model` 选择对应 key。
 

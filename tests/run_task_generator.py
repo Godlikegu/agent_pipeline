@@ -11,7 +11,7 @@ def main() -> int:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-    markdown_path = Path("/home/guyuxuan/pipeline/tests/output/test.md").resolve()
+    markdown_path = Path("/data/guyuxuan/agent/paper_md/sim.md").resolve()
     if not markdown_path.exists():
         print(f"[ERROR] Markdown 不存在: {markdown_path}")
         return 2
@@ -43,7 +43,7 @@ def main() -> int:
         return 5
 
     from utils.llm_client import create_client
-    from task_gen import TaskDescriptionGenerator
+    from agents.task_generator import TaskGeneratorAgent
 
     client, model_name = create_client(llm_config, model_key)
     task_gen_cfg = config.get("task_gen", {})
@@ -52,10 +52,10 @@ def main() -> int:
         or "根据论文内容，生成一个适用于逆问题求解 pipeline 的任务描述，包含问题定义、输入输出约束和评估要求。"
     )
 
-    generator = TaskDescriptionGenerator.from_config(
+    generator = TaskGeneratorAgent.from_config(
         client=client,
         model_name=model_name,
-        config=task_gen_cfg,
+        config=config,
     )
 
     print(f"[INFO] 输入: {markdown_path}")
