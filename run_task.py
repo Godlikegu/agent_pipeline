@@ -49,20 +49,22 @@ def load_task_description(
     client: OpenAI,
     model_name: str,
 ) -> str:
-    """Load an explicit task description or generate one from paper markdown."""
+    """Load an explicit task description or generate one from paper markdown.
+    When generating, saves to task_description_path if set (cache: next run will load from same path).
+    """
     explicit_desc_path = task_info.get("task_description_path")
     if explicit_desc_path:
         desc_path = Path(explicit_desc_path).expanduser().resolve()
-        if not desc_path.exists():
-            raise FileNotFoundError(f"task_description_path not found: {desc_path}")
-        print(f"  ✓ Loading task description from explicit path: {desc_path}")
-        return _read_text(desc_path)
+        if desc_path.exists():
+            print(f"  ✓ Loading task description from: {desc_path}")
+            return _read_text(desc_path)
+        # 文件不存在则继续走“从论文生成”，并保存到 task_description_path，相当于缓存
 
     paper_markdown_path = _resolve_paper_markdown_path(task_info, config)
     if paper_markdown_path is None:
         raise FileNotFoundError(
-            "No task_description_path was provided, and no paper markdown could be found. "
-            "Please provide task_description_path or paper_markdown_path."
+            "No task_description_path (with existing file) and no paper markdown could be found. "
+            "Provide task_description_path, or paper_markdown_path / paper_markdown_dir."
         )
     if not paper_markdown_path.exists():
         raise FileNotFoundError(f"Paper markdown not found: {paper_markdown_path}")
@@ -76,8 +78,10 @@ def load_task_description(
     default_desc_dir = config.get("paths", {}).get(
         "task_descriptions_dir", "./data/task_descriptions"
     )
+    # 优先写到 task_description_path，实现“同路径读写”的缓存
     output_path = Path(
-        task_info.get("task_description_output_path")
+        task_info.get("task_description_path")
+        or task_info.get("task_description_output_path")
         or (Path(default_desc_dir) / f"{task_info['name']}_description.md")
     ).expanduser().resolve()
 

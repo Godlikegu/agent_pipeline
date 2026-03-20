@@ -65,9 +65,9 @@ agents:
 # ========== Task Generation ==========
 task_gen:
   default_user_prompt: "Read the paper markdown and generate a detailed task_description for the inverse-problem pipeline, including problem formulation, input/output constraints, reconstruction strategy, evaluation expectations, and implementation cautions."
-  paper_markdown_dir: "./data/paper_markdown"
+  paper_markdown_dir: "/data/guyuxuan/agent/paper_md"
   generator:
-    system_prompt_path: "./agents/prompts/task_generator_system.txt"
+    system_prompt_path: "./prompt_optimizer/optimized_prompts/task_generator_prompt_epoch_13.txt"
     temperature: 0.0
     max_tokens: 16000
     max_loops: 3

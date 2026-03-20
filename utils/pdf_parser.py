@@ -25,6 +25,7 @@ class PaddleOCRMarkdownParser:
         pdf_path: str | Path,
         output_dir: str | Path,
         force: bool = False,
+        save_images: bool = False,
     ) -> Path:
         pdf_file = Path(pdf_path).expanduser().resolve()
         if not pdf_file.exists():
@@ -50,13 +51,14 @@ class PaddleOCRMarkdownParser:
         markdown_text = self.pipeline.concatenate_markdown_pages(markdown_list)
         markdown_path.write_text(markdown_text, encoding="utf-8")
 
-        for image_bundle in markdown_images:
-            if not image_bundle:
-                continue
-            for relative_path, image in image_bundle.items():
-                image_path = target_dir / relative_path
-                image_path.parent.mkdir(parents=True, exist_ok=True)
-                image.save(image_path)
+        if save_images:
+            for image_bundle in markdown_images:
+                if not image_bundle:
+                    continue
+                for relative_path, image in image_bundle.items():
+                    image_path = target_dir / relative_path
+                    image_path.parent.mkdir(parents=True, exist_ok=True)
+                    image.save(image_path)
 
         return markdown_path
 
@@ -66,13 +68,14 @@ class PaddleOCRMarkdownParser:
         output_dir: str | Path,
         recursive: bool = True,
         force: bool = False,
+        save_images: bool = False,
     ) -> List[Path]:
         source = Path(input_path).expanduser().resolve()
         output_root = Path(output_dir).expanduser().resolve()
         output_root.mkdir(parents=True, exist_ok=True)
 
         if source.is_file():
-            return [self.convert_pdf(source, output_root, force=force)]
+            return [self.convert_pdf(source, output_root, force=force, save_images=save_images)]
 
         if not source.is_dir():
             raise FileNotFoundError(f"Input path not found: {source}")
@@ -87,7 +90,7 @@ class PaddleOCRMarkdownParser:
             relative_parent = pdf_file.parent.relative_to(source)
             target_dir = output_root / relative_parent
             markdown_paths.append(
-                self.convert_pdf(pdf_file, target_dir, force=force)
+                self.convert_pdf(pdf_file, target_dir, force=force, save_images=save_images)
             )
         return markdown_paths
 
@@ -106,6 +109,11 @@ def main() -> int:
         action="store_true",
         help="Regenerate markdown even if the target file already exists.",
     )
+    parser.add_argument(
+        "--save-images",
+        action="store_true",
+        help="Save extracted images (e.g. imgs/ folder). Default: do not save.",
+    )
     args = parser.parse_args()
 
     parser_instance = PaddleOCRMarkdownParser()
@@ -114,6 +122,7 @@ def main() -> int:
         output_dir=args.output_dir,
         recursive=not args.non_recursive,
         force=args.force,
+        save_images=args.save_images,
     )
 
     for markdown_path in markdown_paths:

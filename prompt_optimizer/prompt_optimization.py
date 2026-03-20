@@ -59,24 +59,26 @@ class OptimizationSample:
 
 
 class SafeLiteLLMEngine(LiteLLMEngine):
-    """LiteLLM engine with explicit api_key/base_url forwarding."""
+    """LiteLLM engine with explicit api_key/base_url/temperature forwarding."""
 
-    def __init__(self, model_string, api_key=None, base_url=None, **kwargs):
+    def __init__(self, model_string, api_key=None, base_url=None, temperature=None, **kwargs):
         super().__init__(model_string, **kwargs)
         self.api_key = api_key
         self.base_url = base_url
+        self.temperature = temperature
 
     def lite_llm_generate(self, content, system_prompt=None, **kwargs) -> str:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content},
         ]
+        call_kwargs = dict(api_key=self.api_key, base_url=self.base_url, **kwargs)
+        if self.temperature is not None:
+            call_kwargs.setdefault("temperature", self.temperature)
         return completion(
             model=self.model_string,
             messages=messages,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            **kwargs,
+            **call_kwargs,
         )["choices"][0]["message"]["content"]
 
 
@@ -98,10 +100,12 @@ def get_llm_config(config_path: str | Path, model_key: str) -> dict:
 def build_engine(config_path: str | Path, model_key: str) -> SafeLiteLLMEngine:
     model_conf = get_llm_config(config_path, model_key)
     model_name = model_conf.get("model_name", model_key)
+    temperature = model_conf.get("temperature")
     return SafeLiteLLMEngine(
         model_string=f"openai/{model_name}",
         api_key=model_conf.get("api_key"),
         base_url=model_conf.get("base_url"),
+        temperature=temperature,
     )
 
 
