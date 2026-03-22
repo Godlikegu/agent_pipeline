@@ -1,59 +1,27 @@
 """
-skills — 知识管理系统
+Skill system — knowledge skills (general + task-specific) and code skills.
 
-提供 create_skill_manager() 工厂函数，根据 config/default.yaml 中的
-skills.enabled 和 skills.mode 配置创建对应的 SkillManager 实例。
-
-Pipeline 侧通过此工厂获取 skill_manager，无需判断 None，
-统一调用 retrieve_knowledge / distill_and_store 等接口。
-skills.enabled=false 时返回 NoSkillManager（空实现，无副作用）。
+Skills are stored as Claude-compatible SKILL.md files.
+Toggle via config `skills.enabled`.
 """
-
-from .manager import SkillManager
-from .ablation import (
-    NoSkillManager,
-    InstanceOnlyManager,
-    ExperienceOnlyManager,
-    InstanceExpManager,
-)
+from .ablation import NoSkillManager
 
 
 def create_skill_manager(config: dict, client=None, model_name: str = "") -> object:
-    """
-    根据配置创建 SkillManager 实例。
-
-    Args:
-        config: 完整配置字典（load_config() 返回值）。
-        client: OpenAI-compatible LLM 客户端。
-        model_name: LLM 模型名。
-
-    Returns:
-        SkillManager 或其消融变体。skills.enabled=false 时返回 NoSkillManager。
-    """
+    """Factory: returns FileSkillManager or NoSkillManager based on config."""
     skills_cfg = config.get("skills", {})
-
-    if not skills_cfg.get("enabled", True):
+    if not skills_cfg.get("enabled", False):
         return NoSkillManager()
 
-    mode = skills_cfg.get("mode", "default")
+    from .file_manager import FileSkillManager
 
-    if mode == "none":
-        return NoSkillManager()
-
-    # 创建真实的 SkillManager
-    db_path = config.get("paths", {}).get("skills_db", "./data/skills.db")
-    real_manager = SkillManager(
-        db_path=db_path,
-        client=client,
-        model_name=model_name,
-        config=skills_cfg,
-    )
-
-    mode_map = {
-        "default": real_manager,
-        "instance": InstanceOnlyManager(real_manager),
-        "experience": ExperienceOnlyManager(real_manager),
-        "instance_exp": InstanceExpManager(real_manager),
+    paths_cfg = config.get("paths", {})
+    merged = dict(skills_cfg)
+    merged["_paths"] = {
+        "active_dir": paths_cfg.get("skills_active_dir", "./.claude/skills"),
+        "draft_dir": paths_cfg.get("skills_draft_dir", "./skills/library/drafts"),
+        "registry": paths_cfg.get("skills_registry", "./skills/library/registry.json"),
+        "code_pool": paths_cfg.get("skills_code_pool", "./skills/library/code_pool"),
+        "embedding_model_dir": paths_cfg.get("skills_embedding_model_dir", "./skills/embeddings/all-MiniLM-L6-v2"),
     }
-
-    return mode_map.get(mode, real_manager)
+    return FileSkillManager(client=client, model_name=model_name, config=merged)
