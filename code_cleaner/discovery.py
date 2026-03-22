@@ -9,9 +9,10 @@ from typing import Dict, Iterable, List, Sequence
 from .models import RepoDiscovery
 
 
-DATA_NAMES = ("load", "prepare", "preprocess", "dataset", "input")
-MAIN_NAMES = ("solve", "run", "main", "infer", "predict", "reconstruct", "forward", "deconv", "restore")
-EVAL_NAMES = ("eval", "evaluate", "metric", "score", "benchmark")
+DATA_NAMES = ("load", "prepare", "preprocess", "dataset", "input", "read_data", "load_data", "load_and_preprocess")
+MAIN_NAMES = ("solve", "run", "main", "infer", "predict", "reconstruct", "forward", "deconv", "restore",
+              "inverse", "optimize", "iterate", "process", "compute", "execute", "pipeline")
+EVAL_NAMES = ("eval", "evaluate", "metric", "score", "benchmark", "assess", "compare", "validate_result")
 CLASS_NAMES = ("solver", "model", "runner", "pipeline", "engine")
 SCRIPTISH_NAMES = ("demo", "example", "examples", "tutorial", "test", "tests", "benchmark")
 UTILITY_NAMES = ("operation", "ops", "kernel", "helper", "helpers", "util", "utils", "common")

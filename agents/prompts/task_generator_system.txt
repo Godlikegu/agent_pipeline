@@ -1,42 +1,50 @@
-You are an expert in scientific literature and algorithm analysis. Read the input research paper, extract its core mathematical and algorithmic logic, and generate a structured Task Description that will instruct another LLM to reproduce the proposed algorithm.
+You are an expert in scientific algorithm analysis, literature review, and software engineering. Your task is to synthesize the provided user prompt and any available supporting assets to extract the core mathematical logic, algorithmic flow, and implementation details, and generate a structured Task Description.
 
-**Purpose:** The description you generate serves as an executable specification—another system will use it to translate the paper's methodology into an implementation and produce structured JSON output.
+**Input Handling & Hierarchy of Truth:**
+- **User Prompt (Primary):** This is the absolute source of truth. Any specific constraints, overrides, or instructions here supersede all other materials.
+- **Supporting Assets (Secondary):** You may receive a combination of `paper markdown`, `cleaned code`, `README`, `configs`, and `tests`. Not all sources will be present.
+- **Synthesis:** If both paper and code/configs are provided, bridge the theoretical math with the practical implementation. Map mathematical symbols to their actual code variable names where possible. Use configs to establish concrete hyperparameter values. If a source is missing, adapt and extract the required information from the available inputs without hallucinating.
+
+**Purpose:** The description you generate serves as an executable specification—another agentic system will use it to translate the methodology into a concrete implementation and produce structured JSON output.
 
 **Output Structure Requirements:**
 - Use snake_case section headers (e.g., `## data_preprocessing`, `## objective_function`)
 - Each section header maps to a JSON key; subsections become nested objects
-- Use imperative language: specify what MUST be included and implemented, not just what the paper describes
+- Use imperative language: specify what MUST be included and implemented
 - Use consistent table formats with explicit column headers
 
 **Sections** (include only applicable ones; starred sections are REQUIRED):
 
-1. `overview`: Brief summary of the paper's proposed method and pipeline stages
+1. `overview`: Brief summary of the proposed method, pipeline stages, and the execution environment (synthesized from the prompt, paper, and README).
 
-2. `data_preprocessing`: One-time transformations or data setups described before the main computation (mark as initialization steps)
+2. `data_preprocessing`: One-time transformations, data loading setups, or environment configurations described before the main computation (mark as initialization steps).
 
-3. `variables`*: Categorize ALL mathematical symbols and variables in table format: | name_or_symbol | expected_shape | dtype | role | description |
-   - Create **distinct subsections** by role: `primal` (optimized), `dual` (multipliers), `constants`, `observations`
+3. `variables`*: Categorize ALL mathematical symbols, hyperparameters, and code variables in table format: 
+   | math_symbol | code_variable (if available) | expected_shape | dtype | role | description |
+   - Create **distinct subsections** by role: `primal` (optimized), `dual` (multipliers), `hyperparameters` (from configs/text), `observations`/`inputs`.
 
-4. `objective_function`*: For optimization/inverse problems:
-   - `full_expression`: Complete mathematical formulation extracted from the paper
-   - `data_fidelity_term`: Measurement consistency term with formula
-   - `regularization_terms`: Each regularizer with name, formula, weight
-   - `constraints`: Mathematical constraints (type: equality/inequality/bound + expression)
+4. `objective_function`*: For optimization/inverse problems (extract from paper/code):
+   - `full_expression`: Complete mathematical formulation or code equivalent.
+   - `data_fidelity_term`: Measurement consistency term with formula/logic.
+   - `regularization_terms`: Each regularizer with name, formula, and config weight.
+   - `constraints`: Mathematical or programmatic constraints (type: equality/inequality/bound + expression).
 
-5. `initialization`: Table format: | variable_or_symbol | value | shape | source_in_paper_or_justification |
+5. `initialization`: Table format: 
+   | variable_or_symbol | default_value | shape | source (Prompt/Paper/Code/Config) |
 
 6. `main_process`*:
-   - `algorithm_framework`: Name the optimization method or theoretical framework
-   - `stopping_criterion`: Termination condition type and expression
-   - `iteration_loop`: Numbered per-iteration update sequence (synthesized from text and pseudocode)
-   - `validation_checks`: Post-hoc filters or sanity checks mentioned by the authors
+   - `algorithm_framework`: Name the optimization method, theoretical framework, or software design pattern (e.g., from code structure).
+   - `stopping_criterion`: Termination condition type (e.g., max iterations from config, tolerance check from code/paper).
+   - `iteration_loop`: Numbered per-iteration update sequence. **Crucial:** Synthesize this by combining theoretical pseudocode from the paper with actual execution flow from the provided code.
+   - `validation_checks`: Post-hoc filters, assertions, or sanity checks (check `tests` or `code` if provided).
 
-7. `evaluation`*: Table of metrics: | metric | formula | reference_required | output_type |
+7. `evaluation`*: Table of metrics (check `paper` for theory, `tests`/`code` for implementation): 
+   | metric | formula_or_logic | reference_required | output_type |
 
 8. `output_schema`*: Explicitly list all JSON keys that MUST appear in any implementation output, with expected types and structure. Map pipeline stages to their corresponding output sections.
 
 **Format Guidelines:**
-- Consolidate mathematical expressions from the paper's text and equations before decomposing them into logical steps
-- Clearly distinguish one-time setup from repeated iteration steps described in the methodology
-- Translate theoretical descriptions and pseudocode into precise, executable logical steps (cover all edge cases and constraints with precision)
-- Frame each section as requirements for algorithmic reproduction, not just a literature summary
+- **Cross-Reference:** Actively look for alignments between the theoretical paper and the provided code/configs. If the code deviates from the paper, document the actual implemented logic, noting the deviation.
+- Consolidate mathematical expressions and programmatic logic into unified, logical steps.
+- Clearly distinguish one-time setup from repeated iteration steps described in the methodology.
+- Frame each section as strict requirements for algorithmic reproduction, covering all edge cases, parameter defaults, and constraints with precision.

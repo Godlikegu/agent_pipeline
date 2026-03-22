@@ -60,6 +60,7 @@ class CodeCleaner:
             if llm_client is not None and llm_model_name
             else None
         )
+        self._paper_md_content: Optional[str] = None
         self.validator = CleanerValidator()
 
     def clean(
@@ -90,6 +91,10 @@ class CodeCleaner:
             paper_src = Path(paper_md).expanduser().resolve()
             if paper_src.exists():
                 shutil.copy2(paper_src, run_dir / paper_src.name)
+                try:
+                    self._paper_md_content = paper_src.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    self._paper_md_content = None
 
         sandbox_root = self._resolve_sandbox_root(repo_name=repo_name, run_dir=run_dir)
         env_resolver = EnvironmentResolver(
@@ -118,6 +123,7 @@ class CodeCleaner:
         cleaned_code_path = run_dir / "code_cleaned.py"
 
         best_report: Optional[ValidationReport] = None
+        best_code: Optional[str] = None
         variants = self._build_variants(discovery)
         for index, variant in enumerate(variants, 1):
             cleaned_code_path.write_text(variant["code"], encoding="utf-8")
@@ -140,8 +146,12 @@ class CodeCleaner:
             self._write_json(run_dir / f"validation_attempt_{index}.json", self._serialize_report(report))
             if best_report is None or (report.accepted and not best_report.accepted):
                 best_report = report
+                best_code = variant["code"]
             if report.accepted:
                 break
+
+        if best_code is not None:
+            cleaned_code_path.write_text(best_code, encoding="utf-8")
 
         if best_report is None:
             best_report = ValidationReport(
@@ -197,31 +207,30 @@ class CodeCleaner:
     def _store_code_skill(self, result: CleaningResult) -> None:
         cleaned_code = result.cleaned_code_path.read_text(encoding="utf-8")
         snippet = self._extract_code_snippet(cleaned_code)
-        references = [
-            f"Cleaned facade: {result.cleaned_code_path}",
-            f"Validation summary: {result.run_dir / 'validation_summary.json'}",
-        ]
+        instructions = "\n".join([
+            "## When to use",
+            f"- Adapting validated code from `{result.repo_name}` into a unified wrapper.",
+            "",
+            "## Guidance",
+            "- Prefer this wrapper for a stable single-file interface over heterogeneous research code.",
+            "- Keep the adapter thin and validate wrapped behavior before reusing.",
+            "",
+            "## Constraints",
+            "- Revalidate when the upstream entrypoint or environment changes.",
+            "- Do not treat adapter equivalence as proof of scientific optimality.",
+        ])
         self.skill_manager.store_code_skill(
-            title=f"{result.repo_name}-validated-cleaner-adapter",
-            description=f"Validated code skill extracted from cleaned repository `{result.repo_name}`.",
-            summary="Reusable adapter wrapper exposing unified data_process/main_process/eval entrypoints.",
-            guidance=[
-                "Prefer this wrapper when you need a stable single-file interface over heterogeneous research code.",
-                "Keep the adapter thin and validate the wrapped behavior before reusing the snippet elsewhere.",
-            ],
-            constraints=[
-                "Revalidate when the upstream repository entrypoint or environment changes.",
-                "Do not treat adapter equivalence as proof of scientific optimality.",
-            ],
-            references=references,
+            title=f"{result.repo_name}-validated-adapter",
+            description=f"Validated code skill from cleaned repository `{result.repo_name}`.",
+            instructions=instructions,
             code_snippet=snippet,
             repo_name=result.repo_name,
         )
 
     def _extract_code_snippet(self, cleaned_code: str) -> str:
-        markers = ["def data_process", "def main_process", "def eval"]
+        markers = ["def load_and_preprocess_data", "def main_process", "def evaluate_results"]
         lines = cleaned_code.splitlines()
-        selected = []
+        selected: list[str] = []
         capture = False
         for line in lines:
             if any(marker in line for marker in markers):
@@ -266,6 +275,8 @@ class CodeCleaner:
     def _build_variants(self, discovery) -> list[dict]:
         variants: list[dict] = []
         if self.llm_synthesizer is not None:
+            if self._paper_md_content:
+                self.llm_synthesizer.paper_md = self._paper_md_content
             variants.append(self.llm_synthesizer.generate_variant(discovery))
             static_variants = self.facade_synthesizer.generate_variants(discovery)
             if static_variants:
@@ -350,7 +361,7 @@ def build_code_cleaner_from_config(
     llm_client=None,
     llm_model_name: Optional[str] = None,
 ) -> CodeCleaner:
-    artifact_root = config.get("paths", {}).get("code_cleaner_root", "./artifacts/code_cleaner")
+    artifact_root = config.get("paths", {}).get("code_cleaner_workdir", "./artifacts/code_cleaner")
     cleaner_cfg = config.get("code_cleaner", {})
     return CodeCleaner(
         artifact_root=artifact_root,
@@ -364,7 +375,7 @@ def build_code_cleaner_from_config(
         llm_model_name=llm_model_name,
         llm_required=cleaner_cfg.get("llm_required", False),
         llm_temperature=cleaner_cfg.get("llm_temperature", 0.0),
-        llm_max_tokens=cleaner_cfg.get("llm_max_tokens", 12000),
+        llm_max_tokens=cleaner_cfg.get("llm_max_tokens", 16000),
         llm_max_loops=cleaner_cfg.get("llm_max_loops", 3),
         force_rebuild_env=cleaner_cfg.get("force_rebuild_env", False),
     )

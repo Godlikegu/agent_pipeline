@@ -14,9 +14,10 @@ DEFAULT_SYSTEM_PROMPT_PATH = (
 )
 
 DEFAULT_USER_PROMPT = (
-    "Read the paper markdown and generate a detailed task_description for the "
-    "inverse-problem pipeline, including problem formulation, input/output "
-    "constraints, reconstruction strategy, evaluation expectations, and "
+    "Generate a detailed task_description for the scientific coding pipeline. "
+    "The final description must turn the user request and any optional paper, "
+    "code, README, config, and test context into an implementation-ready "
+    "specification with clear inputs, outputs, process steps, validation, and "
     "implementation cautions."
 )
 
@@ -116,6 +117,13 @@ class TaskGeneratorAgent(BaseAgent):
         return self._system_prompt_path.read_text(encoding="utf-8").strip()
 
     def _build_user_prompt(self, context: Dict[str, Any]) -> str:
+        if context.get("sources_bundle_text"):
+            user_prompt = (context.get("user_prompt") or self.default_user_prompt).strip()
+            return self.build_model_input_from_sources(
+                user_prompt=user_prompt,
+                sources_bundle_text=context["sources_bundle_text"],
+            )
+
         paper_markdown = context.get("paper_markdown", "").strip()
         if not paper_markdown:
             raise ValueError("TaskGeneratorAgent requires paper_markdown in context.")
@@ -179,6 +187,31 @@ class TaskGeneratorAgent(BaseAgent):
             paper_markdown_path=path,
         )
 
+    def generate_from_sources(
+        self,
+        sources: Any,
+        save_path: Optional[str | Path] = None,
+    ) -> TaskGenerationResult:
+        resolved_user_prompt = (getattr(sources, "user_prompt", None) or self.default_user_prompt).strip()
+        source_bundle_text = self.build_sources_bundle_text(sources)
+        task_description = self.generate(
+            {
+                "sources_bundle_text": source_bundle_text,
+                "user_prompt": resolved_user_prompt,
+            }
+        ).strip()
+
+        result = TaskGenerationResult(
+            task_description=task_description,
+            paper_markdown=getattr(getattr(sources, "paper_markdown", None), "content", ""),
+            user_prompt=resolved_user_prompt,
+            paper_markdown_path=getattr(getattr(sources, "paper_markdown", None), "path", None),
+        )
+        output_path = save_path or getattr(sources, "output_path", None)
+        if output_path is not None:
+            result.save_task_description(output_path)
+        return result
+
     @staticmethod
     def build_model_input(
         paper_markdown: str,
@@ -198,3 +231,64 @@ class TaskGeneratorAgent(BaseAgent):
             "### Paper Markdown\n"
             f"{cleaned_markdown}\n"
         )
+
+    @staticmethod
+    def build_model_input_from_sources(
+        user_prompt: str,
+        sources_bundle_text: str,
+    ) -> str:
+        return (
+            "You are given a scientific coding request and optional supporting materials.\n"
+            "Generate the final task_description for the agentic pipeline.\n\n"
+            "### Required User Prompt\n"
+            f"{user_prompt.strip()}\n\n"
+            "### Optional Source Materials\n"
+            f"{sources_bundle_text.strip()}\n"
+        )
+
+    @staticmethod
+    def build_sources_bundle_text(sources: Any) -> str:
+        sections = []
+
+        def add_section(title: str, content: str, path: Optional[Path] = None) -> None:
+            clean = (content or "").strip()
+            if not clean:
+                return
+            section = f"## {title}\n"
+            if path is not None:
+                section += f"Source Path: {path}\n\n"
+            section += clean
+            sections.append(section)
+
+        paper = getattr(sources, "paper_markdown", None)
+        if paper is not None:
+            add_section("paper_markdown", getattr(paper, "content", ""), getattr(paper, "path", None))
+
+        cleaned_code = getattr(sources, "cleaned_code", None)
+        if cleaned_code is not None:
+            add_section("cleaned_code", getattr(cleaned_code, "content", ""), getattr(cleaned_code, "path", None))
+
+        readme = getattr(sources, "readme", None)
+        if readme is not None:
+            add_section("readme", getattr(readme, "content", ""), getattr(readme, "path", None))
+
+        config_snippets = getattr(sources, "config_snippets", []) or []
+        if config_snippets:
+            config_parts = []
+            for snippet in config_snippets:
+                header = f"### {getattr(snippet, 'path', None) or 'config'}"
+                config_parts.append(f"{header}\n{getattr(snippet, 'content', '')}".strip())
+            add_section("config_snippets", "\n\n".join(config_parts))
+
+        test_snippets = getattr(sources, "test_snippets", []) or []
+        if test_snippets:
+            test_parts = []
+            for snippet in test_snippets:
+                header = f"### {getattr(snippet, 'path', None) or 'test'}"
+                test_parts.append(f"{header}\n{getattr(snippet, 'content', '')}".strip())
+            add_section("test_snippets", "\n\n".join(test_parts))
+
+        if not sections:
+            sections.append("## no_optional_sources\nOnly the required user prompt is available.")
+
+        return "\n\n".join(sections)

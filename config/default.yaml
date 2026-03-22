@@ -5,18 +5,31 @@
 
 # ========== 路径配置 ==========
 paths:
+  # ---- 输入路径 ----
+  paper_pdf_dir: "/data/guyuxuan/agent/paper_pdf"
+  paper_markdown_dir: "/data/guyuxuan/agent/paper_md"
+
+  # ---- 中间产物 / 工作目录 ----
   sandbox_root: "/data/guyuxuan/agent/end_sandbox"
-  skills_db: "./data/skills.db"
-  embedding_model_dir: "./skills/embeddings/all-MiniLM-L6-v2"
+  code_cleaner_workdir: "./artifacts/code_cleaner"
+
+  # ---- 输出路径 ----
+  task_descriptions_dir: "./data/task_descriptions"
+  reports_dir: "./reports"
+
+  # ---- Skills 存储路径 ----
+  skills_active_dir: "./.claude/skills"
+  skills_draft_dir: "./skills/library/drafts"
+  skills_registry: "./skills/library/registry.json"
+  skills_code_pool: "./skills/library/code_pool"
+  skills_embedding_model_dir: "./skills/embeddings/all-MiniLM-L6-v2"
 
 # ========== Pipeline 参数 ==========
 pipeline:
   max_retries: 5                     # 主循环最大重试次数
   execution_timeout: 600             # solver 执行超时（秒）
-  data_gen_timeout: 180              # 数据生成超时（秒）
   syntax_check_timeout: 30           # 语法检查超时（秒）
   max_history_len: 3                 # 保留失败历史条数
-  gt_code_snippet_limit: 4000        # GT 代码截取字符数
   code_size_guard: 12000             # 代码膨胀上限（字符数）
 
 # ========== 评估阈值 ==========
@@ -24,15 +37,26 @@ evaluation:
   min_guaranteed_psnr: 20.0          # PSNR 最低保证阈值（dB）
   baseline_ratio: 0.8                # 动态阈值 = baseline_psnr × ratio
 
+# ========== Code Cleaner ==========
+code_cleaner:
+  llm_enabled: true
+  llm_required: true
+  llm_temperature: 0.0
+  llm_max_tokens: 16000
+  llm_max_loops: 3
+  force_rebuild_env: false
+  data_gen_timeout: 180              # 数据/测试脚本生成执行超时（秒）
+  data_gen_max_retries: 5            # 数据生成最大重试
+  gt_code_snippet_limit: 4000        # GT 代码截取字符数
+
 # ========== Skills 系统 ==========
 skills:
-  enabled: false                      # 总开关：false 则完全不使用 skills
-  mode: "default"                    # "default" | "none" | "instance" | "experience" | "instance_exp"
+  enabled: true                     # 总开关：false 则完全不使用 skills
+  general_promotion_threshold: 2      # general skill 晋升所需佐证次数
   retrieval:
-    max_token_budget: 2000           # 经验知识的 token 预算上限
-    similarity_threshold: 0.50       # 经验注入的相似度门槛
-    max_items: 5                     # 最多注入的经验条数
-    decay_rate: 0.99                 # 懒衰减系数
+    max_token_budget: 2000           # 检索 token 预算上限
+    similarity_threshold: 0.50       # 注入的相似度门槛
+    max_items: 5                     # 最多注入条数
     top_k_coder: 4                   # Coder agent 检索条数
     top_k_default: 3                 # 其他 agent 检索条数
     rank_weights:
@@ -42,10 +66,9 @@ skills:
     initial_score: 1.0               # 新知识初始信用评分
     success_delta: 0.1               # 成功时信用增量
     failure_delta: -0.2              # 失败时信用减量
-    archive_threshold: -0.5          # 低于此分自动归档
   embedding:
-    model_name: "all-MiniLM-L6-v2"   # 本地 SentenceTransformer 模型名
-    dimension: 384                   # 嵌入向量维度
+    model_name: "all-MiniLM-L6-v2"
+    dimension: 384
 
 # ========== Agent 参数 ==========
 agents:
@@ -59,16 +82,13 @@ agents:
   coder:
     max_retries: 3
     temperature: 0.7
-  teacher:
-    temperature: 0.2
 
-# ========== Task Generation ==========
+# ========== Task Description 生成 ==========
 task_gen:
-  default_user_prompt: "Read the paper markdown and generate a detailed task_description for the inverse-problem pipeline, including problem formulation, input/output constraints, reconstruction strategy, evaluation expectations, and implementation cautions."
-  paper_markdown_dir: "/data/guyuxuan/agent/paper_md"
+  default_user_prompt: "Generate a detailed task_description for the scientific coding pipeline. Use the required user prompt as the primary source of truth, and incorporate any available paper markdown, cleaned code, README, configs, and tests into a clear implementation-ready specification."
+  paper_markdown_char_limit: 40000
   generator:
-    system_prompt_path: "./prompt_optimizer/optimized_prompts/task_generator_prompt_epoch_13.txt"
+    system_prompt_path: "./agents/prompts/task_generator_system.txt"
     temperature: 0.0
     max_tokens: 16000
     max_loops: 3
-    paper_markdown_char_limit: 40000

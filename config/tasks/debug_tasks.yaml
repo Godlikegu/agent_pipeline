@@ -3,7 +3,7 @@ tasks:
 - gt_code_path: /home/yjh/sim_sandbox/sim_code.py
   name: sim
   python_path: /home/yjh/.conda/envs/sim/bin/python
-  task_description_path: /home/guyuxuan/pipeline/tests/output/task_desc/task_description.md
+  task_description_path: data/task_descriptions/sim_description.md
 
 - gt_code_path: /home/yjh/bpm_sandbox/bpm_code.py
   name: bpm
