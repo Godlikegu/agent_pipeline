@@ -1,2 +1,2 @@
-"""core — Pipeline 核心工作流模块"""
-from .workflow import InverseProblemWorkflow
+"""core — Pipeline workflow module."""
+from .workflow import PipelineWorkflow
