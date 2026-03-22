@@ -10,9 +10,9 @@ class ExecutionReporter:
         self.start_time = time.time()
         self.results = []
         self.total_stats = {
-            'instances': 0,
-            'experiences': 0,
-            'core': 0
+            'knowledge_general': 0,
+            'knowledge_task_specific': 0,
+            'code': 0,
         }
 
     def add_result(self, task_name: str, workflow: Any, success: bool, elapsed: float):
@@ -24,10 +24,8 @@ class ExecutionReporter:
         # Extract generated knowledge stats (if available)
         dist_stats = getattr(workflow, 'distillation_stats', {'instances': 0, 'experiences': 0, 'core': 0})
 
-        # Update totals
-        self.total_stats['instances'] += dist_stats.get('instances', 0)
-        self.total_stats['experiences'] += dist_stats.get('experiences', 0)
-        self.total_stats['core'] += dist_stats.get('core', 0)
+        for key in self.total_stats:
+            self.total_stats[key] += dist_stats.get(key, 0)
 
         result_entry = {
             "task_name": task_name,
