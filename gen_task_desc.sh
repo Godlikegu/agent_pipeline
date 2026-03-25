@@ -8,7 +8,7 @@ set -euo pipefail
 # ============================================================
 
 PYTHON_BIN="${PYTHON_BIN:-/home/guyuxuan/.conda/envs/agent/bin/python}"
-LLM_CONFIG_PATH="${LLM_CONFIG_PATH:-/home/guyuxuan/pipeline/config/llm.yaml}"
+LLM_CONFIG_PATH="${LLM_CONFIG_PATH:-config/llm.yaml}"
 MODEL_NAME="${MODEL_NAME:-cds/Claude-4.6-opus}"
 
 USER_PROMPT="${USER_PROMPT:-Generate a detailed task_description for the scientific coding pipeline.}"
