@@ -1,5 +1,5 @@
 """
-core/workflow_base.py — Pipeline workflow base class.
+core/workflow_base.py -- Pipeline workflow base class.
 
 Assumes the sandbox is already set up (by code_cleaner) with:
   - dataset/input.npy, dataset/gt_output.npy, dataset/baseline.npy
@@ -84,11 +84,16 @@ class WorkflowBase:
         self.min_guaranteed_psnr = eval_cfg.get("min_guaranteed_psnr", 20.0)
         self.baseline_ratio = eval_cfg.get("baseline_ratio", 0.8)
 
+        self.top_k_planner = retrieval_cfg.get("top_k_planner", 3)
         self.top_k_coder = retrieval_cfg.get("top_k_coder", 4)
-        self.top_k_default = retrieval_cfg.get("top_k_default", 3)
 
         self.used_knowledge_ids: set = set()
         self.distillation_stats = {"knowledge_general": 0, "knowledge_task_specific": 0, "code": 0}
+
+        # ---- Trajectory recording ----
+        self.round_trajectories: List[Dict] = []
+        self._current_round: Dict = {}
+        self._round_skills_injected: Dict[int, set] = {}  # round_id -> set of skill IDs
 
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.exp_id = f"{self.task_name}_{timestamp}"
@@ -110,7 +115,77 @@ class WorkflowBase:
         with open(self.log_file, "a", encoding="utf-8") as f:
             f.write(formatted + "\n")
 
-    # ---- trajectory recording ----
+    # ---- round trajectory lifecycle ----
+    def _start_round(self, round_id: int):
+        """Initialize a new round trajectory record."""
+        self._current_round = {
+            "round_id": round_id,
+            "task_name": self.task_name,
+            "success": False,
+            "planner_output": "",
+            "critic_output": "",
+            "architect_output": "",
+            "coder_output": "",
+            "execution_success": False,
+            "execution_stdout": "",
+            "execution_stderr": "",
+            "eval_metrics": None,
+            "judge_output": None,
+            "skills_used_ids": [],
+            "timestamp": time.time(),
+        }
+        self._round_skills_injected[round_id] = set()
+
+    def _record_round_agent(self, agent_name: str, output: Any):
+        """Record an agent's output into the current round trajectory."""
+        if not self._current_round:
+            return
+        key_map = {
+            "Planner": "planner_output",
+            "Critic": "critic_output",
+            "Architect": "architect_output",
+            "Coder": "coder_output",
+        }
+        key = key_map.get(agent_name)
+        if key:
+            if isinstance(output, dict):
+                text = json.dumps(output, default=str)[:5000]
+            else:
+                text = str(output)[:5000]
+            # For Coder, append (multiple calls per round)
+            if agent_name == "Coder" and self._current_round.get(key):
+                self._current_round[key] += f"\n---\n{text}"
+            else:
+                self._current_round[key] = text
+
+    def _record_round_execution(self, success: bool, stdout: str, stderr: str, metrics: dict):
+        """Record execution results into the current round trajectory."""
+        if not self._current_round:
+            return
+        self._current_round["execution_success"] = success
+        self._current_round["execution_stdout"] = (stdout or "")[:3000]
+        self._current_round["execution_stderr"] = (stderr or "")[:3000]
+        self._current_round["eval_metrics"] = metrics
+
+    def _record_round_judge(self, judge_output: dict):
+        """Record judge output into the current round trajectory."""
+        if not self._current_round:
+            return
+        self._current_round["judge_output"] = judge_output
+
+    def _finalize_round(self, success: bool):
+        """Finalize current round and add to trajectories list."""
+        if not self._current_round:
+            return
+        self._current_round["success"] = success
+        round_id = self._current_round.get("round_id", 0)
+        self._current_round["skills_used_ids"] = list(
+            self._round_skills_injected.get(round_id, set())
+        )
+        self.round_trajectories.append(self._current_round)
+        self._current_round = {}
+
+    # ---- legacy trajectory recording (kept for snapshot compatibility) ----
     def _record_step(self, iteration: int, role: str, input_data: Any, output_data: Any, retrieval_key: str = None):
         if retrieval_key is None:
             retrieval_key = self._generate_retrieval_key(role, input_data, output_data)
@@ -243,21 +318,43 @@ class WorkflowBase:
             if relevant:
                 context["failure_history"] = format_failure_histories(relevant)
 
-        try:
-            query_text = retrieval_query or self.task_desc.split("### GENERAL KNOWLEDGE")[0].strip()
-            top_k = self.top_k_coder if agent_role == "Coder" else self.top_k_default
-            knowledge = self.skill_manager.retrieve_knowledge(task_desc=query_text, agent_role=agent_role, top_k=top_k)
+        # Skills injection: ONLY for Planner and Coder
+        if agent_role in ("Planner", "Coder"):
+            try:
+                query_text = retrieval_query or self.task_desc.split("### GENERAL KNOWLEDGE")[0].strip()
+                top_k = self.top_k_coder if agent_role == "Coder" else self.top_k_planner
 
-            for cat_items in knowledge.values():
-                for item in cat_items:
-                    if "id" in item:
-                        self.used_knowledge_ids.add(item["id"])
+                # Get already-injected IDs for this round (dedup for Coder multi-call)
+                round_id = self._current_round.get("round_id", 0)
+                already_injected = self._round_skills_injected.get(round_id, set())
 
-            knowledge_prompt = self.skill_manager.format_knowledge_for_prompt(knowledge)
-            if knowledge_prompt:
-                context["knowledge_context"] = knowledge_prompt
-        except Exception as e:
-            self._log(f"  [System] Knowledge injection failed: {e}")
+                knowledge = self.skill_manager.retrieve_knowledge(
+                    task_desc=query_text,
+                    agent_role=agent_role,
+                    top_k=top_k,
+                    exclude_ids=already_injected,
+                )
+
+                for cat_items in knowledge.values():
+                    for item in cat_items:
+                        if "id" in item:
+                            self.used_knowledge_ids.add(item["id"])
+                            self._round_skills_injected.setdefault(round_id, set()).add(item["id"])
+
+                knowledge_prompt = self.skill_manager.format_knowledge_for_prompt(knowledge)
+                if knowledge_prompt:
+                    context["knowledge_context"] = knowledge_prompt
+
+                    # Log which skills were injected
+                    skill_names = []
+                    for cat_items in knowledge.values():
+                        for item in cat_items:
+                            tier = item.get("tier", "?")
+                            skill_names.append(f"{item.get('name', '?')} [{tier}]")
+                    if skill_names:
+                        self._log(f"  [Skills] Injected for {agent_role}: {', '.join(skill_names)}")
+            except Exception as e:
+                self._log(f"  [System] Knowledge injection failed: {e}")
 
         return context
 
@@ -281,7 +378,7 @@ class WorkflowBase:
             try:
                 details = self.skill_manager.get_knowledge_details(list(self.used_knowledge_ids))
                 for item in details:
-                    report += f"  - {item.get('name', 'unknown')} (score: {item.get('credit_score', 0):.2f})\n"
+                    report += f"  - {item.get('name', 'unknown')} [{item.get('tier', '?')}]\n"
             except Exception as e:
                 report += f"  Error: {e}\n"
         report += "=" * 50 + "\n"

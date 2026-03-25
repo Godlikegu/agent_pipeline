@@ -23,6 +23,7 @@ paths:
   skills_registry: "./skills/library/registry.json"
   skills_code_pool: "./skills/library/code_pool"
   skills_embedding_model_dir: "./skills/embeddings/all-MiniLM-L6-v2"
+  trajectories_dir: "./data"                     # 轨迹存储根目录: data/<task>/trajectories/
 
 # ========== Pipeline 参数 ==========
 pipeline:
@@ -51,21 +52,21 @@ code_cleaner:
 
 # ========== Skills 系统 ==========
 skills:
-  enabled: true                     # 总开关：false 则完全不使用 skills
-  general_promotion_threshold: 2      # general skill 晋升所需佐证次数
+  retrieval_enabled: true            # 只读开关：允许检索已有 skills（default=true）
+  learning_enabled: false            # 可写开关：允许从轨迹学习（default=false，implies retrieval_enabled=true）
   retrieval:
     max_token_budget: 2000           # 检索 token 预算上限
-    similarity_threshold: 0.50       # 注入的相似度门槛
+    similarity_threshold: 0.60       # 注入的相似度门槛（embedding cosine sim）
     max_items: 5                     # 最多注入条数
+    top_k_planner: 3                 # Planner agent 检索条数
     top_k_coder: 4                   # Coder agent 检索条数
-    top_k_default: 3                 # 其他 agent 检索条数
-    rank_weights:
-      similarity: 0.7               # 排名中相似度权重
-      credit: 0.3                    # 排名中信用分权重
-  credit:
-    initial_score: 1.0               # 新知识初始信用评分
-    success_delta: 0.1               # 成功时信用增量
-    failure_delta: -0.2              # 失败时信用减量
+  learning:
+    merge_similarity_threshold: 0.75 # 相似 skills 合并阈值
+    max_skills_per_distillation: 10  # 单次蒸馏最大 skills 数
+  generator:
+    temperature: 0.3                 # skills_generator agent 温度
+    max_tokens: 16000                # skills_generator agent max_tokens
+    max_loops: 3                     # skills_generator agent 续写循环
   embedding:
     model_name: "all-MiniLM-L6-v2"
     dimension: 384

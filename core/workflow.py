@@ -1,10 +1,15 @@
 """
-core/workflow.py — Main pipeline workflow.
+core/workflow.py -- Main pipeline workflow.
 
 Assumes the sandbox is pre-configured (by code_cleaner) with:
   - dataset/input.npy, dataset/gt_output.npy, dataset/baseline.npy
   - eval_script.py
-Starts from task_description → Planner → Critic → Architect → Coder → Execute → Judge.
+Starts from task_description -> Planner -> Critic -> Architect -> Coder -> Execute -> Judge.
+
+Trajectory recording:
+  - Each round (Planner->...->Judge) is recorded as a RoundTrajectory.
+  - After all rounds complete, trajectories are written to data/<task>/trajectories/.
+  - If learning_enabled, skills are distilled post-task by SkillsGeneratorAgent.
 """
 import os
 import json
@@ -32,14 +37,15 @@ class PipelineWorkflow(WorkflowBase):
         self.baseline_metrics = baseline_metrics
         self._log(f"Baseline metrics: {baseline_metrics}")
 
-        # self._log("[Knowledge System] Skills will be injected per-agent.")
-
         feedback = None
         ticket = "Planner"
 
         while self.retry_count < self.max_retries:
             iter_id = self.retry_count + 1
             self._log(f"\n{'='*20} Iteration {iter_id} (Ticket: {ticket}) {'='*20}")
+
+            # Start round trajectory
+            self._start_round(iter_id)
 
             # ==================== Planner ====================
             if ticket == "Planner":
@@ -56,6 +62,7 @@ class PipelineWorkflow(WorkflowBase):
                 draft_plan = self.planner.generate(plan_ctx)
 
                 critic_valid = False
+                critic_resp_str = ""
                 for _ in range(3):
                     critic_resp_str = self.critic.generate({"task_desc": self.task_desc, "plan": draft_plan})
                     try:
@@ -76,6 +83,8 @@ class PipelineWorkflow(WorkflowBase):
 
                 self.current_plan = draft_plan
                 self._record_step(iter_id, "Planner", input_data=plan_ctx, output_data={"plan": self.current_plan})
+                self._record_round_agent("Planner", self.current_plan)
+                self._record_round_agent("Critic", critic_resp_str)
                 self._save_artifact(f"iter_{iter_id}_plan.md", self.current_plan)
                 ticket = "Architect"
 
@@ -119,6 +128,7 @@ class PipelineWorkflow(WorkflowBase):
                 self._log(f"  Functions: {self.function_list}")
                 self.current_code = self.current_skeleton
                 self._record_step(iter_id, "Architect", input_data=arch_ctx, output_data={"skeleton": self.current_skeleton})
+                self._record_round_agent("Architect", self.current_skeleton)
                 self._save_artifact(f"iter_{iter_id}_skeleton.py", self.current_skeleton)
                 ticket = "Coder"
 
@@ -160,8 +170,11 @@ class PipelineWorkflow(WorkflowBase):
                 with open(os.path.join(self.sandbox_dir, "solver.py"), "w") as f:
                     f.write(self.current_code)
 
+                self._record_round_agent("Coder", self.current_code)
+
                 syntax_ok = self._syntax_check_loop(iter_id)
                 if not syntax_ok:
+                    self._finalize_round(success=False)
                     ticket = "Planner"
                     self.retry_count += 1
                     self._reset_downstream_state("Planner")
@@ -209,18 +222,23 @@ class PipelineWorkflow(WorkflowBase):
 
                 self._record_step(iter_id, "Execution", input_data="solver.py",
                                   output_data={"success": success, "eval_success": eval_success, "metrics": metrics})
+                self._record_round_execution(success, stdout, stderr, metrics)
 
                 if eval_success and metrics:
                     if self._check_threshold(metrics):
+                        self._finalize_round(success=True)
                         self._on_success(metrics, logs)
                         return True
 
                 result = self._judge(logs, metrics, stderr, iter_id)
                 if result is None:
+                    self._finalize_round(success=False)
                     ticket = "Coder"
                     feedback = {"analysis": "Judge output invalid."}
                     self.retry_count += 1
                     continue
+                self._record_round_judge(result)
+                self._finalize_round(success=False)
                 self._reset_downstream_state(result["ticket_assigned_to"])
                 ticket = result["ticket_assigned_to"]
                 feedback = result
@@ -435,7 +453,7 @@ class PipelineWorkflow(WorkflowBase):
             if "evidence" not in result:
                 result["evidence"] = "MISSING"
                 result["ticket_assigned_to"] = "Coder"
-            self._log(f"  Judge → {result['ticket_assigned_to']}: {result.get('analysis', 'N/A')[:100]}")
+            self._log(f"  Judge -> {result['ticket_assigned_to']}: {result.get('analysis', 'N/A')[:100]}")
             self._record_step(iter_id, "Judge", input_data=judge_ctx, output_data=result)
             self.failure_history.append({
                 "iteration": self.retry_count + 1,
@@ -452,48 +470,95 @@ class PipelineWorkflow(WorkflowBase):
             self._log(f"  Judge parse error: {e}")
             return None
 
+    # ---- Trajectory Writing ----
+    def _write_trajectories(self, final_outcome: str):
+        """Write all round trajectories to data/<task>/trajectories/<exp_id>.json"""
+        paths_cfg = self.config.get("paths", {})
+        traj_root = paths_cfg.get("trajectories_dir", "./data")
+        traj_dir = os.path.join(traj_root, self.task_name, "trajectories")
+        os.makedirs(traj_dir, exist_ok=True)
+
+        payload = {
+            "exp_id": self.exp_id,
+            "task_name": self.task_name,
+            "task_desc": self.task_desc[:3000],
+            "final_outcome": final_outcome,
+            "total_rounds": len(self.round_trajectories),
+            "all_skills_used_ids": list(self.used_knowledge_ids),
+            "rounds": self.round_trajectories,
+        }
+
+        path = os.path.join(traj_dir, f"{self.exp_id}.json")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, default=str)
+            self._log(f"  [Trajectories] Written to {path}")
+        except Exception as e:
+            self._log(f"  [Trajectories] Failed to write: {e}")
+
+    # ---- Post-task Skills Analysis ----
+    def _post_task_skills_analysis(self, final_outcome: str):
+        """After task ends, analyze trajectories and manage skills lifecycle."""
+        if not getattr(self.skill_manager, "learning_enabled", False):
+            self._log("  [Skills] Learning disabled, skipping post-task analysis.")
+            return
+
+        try:
+            # 1. Distill new skills from trajectories
+            new_skills = self.skill_manager.distill_from_trajectories(
+                task_name=self.task_name,
+                task_desc=self.task_desc,
+                trajectories=self.round_trajectories,
+                final_outcome=final_outcome,
+            )
+
+            new_skill_ids = {s.id for s in new_skills}
+            self._log(f"  [Skills] Distilled {len(new_skills)} new draft skills:")
+            for s in new_skills:
+                self._log(f"    - {s.title} [{s.category}] [{s.scope}]")
+
+            if final_outcome == "success":
+                # 2. Check first-run success (no prior skills were used)
+                # "First-run" means no draft/permanent skills existed or none were used
+                prior_skills_used = self.used_knowledge_ids - new_skill_ids
+                is_first_run_no_skills = len(prior_skills_used) == 0
+
+                if is_first_run_no_skills and new_skills:
+                    # Promote ALL newly distilled skills to permanent
+                    self._log("  [Skills] First-run success with no prior skills used. Promoting all new skills.")
+                    for s in new_skills:
+                        self.skill_manager.store.promote_to_permanent(s.id)
+                else:
+                    # 3. Promote only USED draft skills to permanent
+                    promoted = self.skill_manager.promote_used_skills(
+                        self.used_knowledge_ids, self.task_name
+                    )
+                    self._log(f"  [Skills] Promoted {len(promoted)} used draft skills to permanent.")
+
+                # 4. Cleanup: delete all remaining drafts for this task
+                deleted = self.skill_manager.cleanup_draft_skills(self.task_name)
+                self._log(f"  [Skills] Cleaned up {deleted} remaining draft skills for task '{self.task_name}'.")
+
+            else:
+                self._log("  [Skills] Task failed. Draft skills retained for future reference.")
+
+        except Exception as e:
+            self._log(f"  [Skills] Post-task analysis failed: {e}")
+            import traceback
+            self._log(traceback.format_exc())
+
+    # ---- Success/Failure handlers ----
     def _on_success(self, metrics, logs):
         self._save_snapshot(self.retry_count + 1, "final_success", {"metrics": metrics})
-        try:
-            self.skill_manager.update_scores(list(self.used_knowledge_ids), success=True)
-            trajectory = {
-                "exp_id": self.exp_id, "task_name": self.task_name,
-                "task_desc": self.task_desc, "outcome": "success",
-                "quality_score": metrics.get("psnr", 0.0),
-                "steps": self.trajectory_steps,
-                "used_knowledge_ids": list(self.used_knowledge_ids),
-                "timestamp": int(time.time()),
-                "final_plan": self.current_plan,
-                "final_skeleton": self.current_skeleton,
-                "final_code": self.current_code,
-                "final_reward": metrics,
-                "key_logs": logs[-2000:],
-            }
-            self.distillation_stats = self.skill_manager.distill_and_store(trajectory)
-        except Exception as e:
-            self._log(f"  Skill distillation failed: {e}")
+        self._write_trajectories("success")
+        self._post_task_skills_analysis("success")
         self.generate_knowledge_report(success=True)
 
     def _on_failure(self):
-        try:
-            self.skill_manager.update_scores(list(self.used_knowledge_ids), success=False)
-            if self.failure_history:
-                last = self.failure_history[-1]
-                trajectory = {
-                    "exp_id": self.exp_id, "task_name": self.task_name,
-                    "task_desc": self.task_desc, "outcome": "failure",
-                    "quality_score": 0.0,
-                    "steps": self.trajectory_steps,
-                    "used_knowledge_ids": list(self.used_knowledge_ids),
-                    "timestamp": int(time.time()),
-                    "final_plan": self.current_plan,
-                    "final_skeleton": self.current_skeleton,
-                    "final_code": self.current_code,
-                    "final_reward": last.get("metrics", 0),
-                    "key_logs": last.get("analysis", "") + "\n" + last.get("evidence", ""),
-                }
-                self.distillation_stats = self.skill_manager.distill_and_store(trajectory)
-        except Exception as e:
-            self._log(f"  Skill distillation failed: {e}")
+        # Finalize last round if still open
+        if self._current_round:
+            self._finalize_round(success=False)
+        self._write_trajectories("failure")
+        self._post_task_skills_analysis("failure")
         self.failure_history.clear()
         self.generate_knowledge_report(success=False)

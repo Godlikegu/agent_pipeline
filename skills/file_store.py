@@ -5,10 +5,15 @@ Categories:
   - knowledge_general     : cross-task reusable patterns
   - knowledge_task_specific: per-task validated strategies or failure lessons
   - code                  : verified code snippets from cleaned repositories
+
+Tiers:
+  - draft     : newly distilled, not yet validated
+  - permanent : promoted after successful task usage
 """
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import time
 import uuid
@@ -18,9 +23,11 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+logger = logging.getLogger(__name__)
 
-DEFAULT_SCORE = 1.0
 VALID_CATEGORIES = {"knowledge_general", "knowledge_task_specific", "code"}
+VALID_TIERS = {"draft", "permanent"}
+VALID_SCOPES = {"General", "Planner", "Coder"}
 
 
 def slugify(value: str) -> str:
@@ -45,24 +52,21 @@ def now_ts() -> int:
 
 @dataclass
 class SkillRecord:
-    """Simplified skill record — one `instructions` field instead of many lists."""
+    """Skill record with draft/permanent tier and Planner/Coder/General scope."""
     id: str
     slug: str
     title: str
     description: str
     category: str                             # knowledge_general | knowledge_task_specific | code
-    status: str = "draft"                     # active | draft
-    agent_scope: str = "General"              # General | Planner | Architect | Coder | Judge
+    tier: str = "draft"                       # draft | permanent
+    scope: str = "General"                    # General | Planner | Coder
+    status: str = "active"                    # active | archived (for soft-delete)
 
     instructions: str = ""                    # Full markdown body (Claude SKILL.md content)
 
     tags: List[str] = field(default_factory=list)
-    score: float = DEFAULT_SCORE
-    usage_count: int = 0
-    success_count: int = 0
-    failure_count: int = 0
-    corroboration_count: int = 0
     source_tasks: List[str] = field(default_factory=list)
+    task_origin: str = ""                     # The task that first created this skill
     code_snippet_path: Optional[str] = None
     fingerprint: str = ""
 
@@ -76,6 +80,38 @@ class SkillRecord:
     def from_dict(cls, data: Dict[str, Any]) -> "SkillRecord":
         known = {f.name for f in cls.__dataclass_fields__.values()}
         return cls(**{k: v for k, v in data.items() if k in known})
+
+
+def _migrate_record(data: dict) -> dict:
+    """Migrate old-format records (with score/agent_scope/etc.) to new format."""
+    # --- tier migration: old 'status' mapped to 'tier' ---
+    if "tier" not in data:
+        old_status = data.get("status", "draft")
+        if old_status == "active":
+            data["tier"] = "permanent"
+        else:
+            data["tier"] = "draft"
+        data["status"] = "active"
+
+    # --- scope migration: old 'agent_scope' mapped to 'scope' ---
+    if "scope" not in data and "agent_scope" in data:
+        old_scope = data.pop("agent_scope", "General")
+        if old_scope in VALID_SCOPES:
+            data["scope"] = old_scope
+        else:
+            data["scope"] = "General"
+
+    # --- remove deprecated fields ---
+    for key in ("score", "usage_count", "success_count", "failure_count",
+                "corroboration_count", "agent_scope"):
+        data.pop(key, None)
+
+    # --- ensure task_origin ---
+    if "task_origin" not in data or not data["task_origin"]:
+        sources = data.get("source_tasks", [])
+        data["task_origin"] = sources[0] if sources else ""
+
+    return data
 
 
 class FileSkillStore:
@@ -101,8 +137,13 @@ class FileSkillStore:
     def _read_registry(self) -> List[SkillRecord]:
         if not self.registry_path.exists():
             return []
-        raw = json.loads(self.registry_path.read_text(encoding="utf-8") or "[]")
-        return [SkillRecord.from_dict(item) for item in raw]
+        try:
+            raw = json.loads(self.registry_path.read_text(encoding="utf-8") or "[]")
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Failed to read registry, returning empty list")
+            return []
+        migrated = [_migrate_record(item) for item in raw]
+        return [SkillRecord.from_dict(item) for item in migrated]
 
     def _write_registry(self, items: List[SkillRecord]) -> None:
         self.registry_path.write_text(
@@ -118,13 +159,24 @@ class FileSkillStore:
             and (category is None or r.category == category)
         ]
 
+    def list_records_by_tier(self, tier: str) -> List[SkillRecord]:
+        """List active records filtered by tier (draft or permanent)."""
+        return [r for r in self._read_registry() if r.tier == tier and r.status == "active"]
+
+    def list_draft_records_for_task(self, task_origin: str) -> List[SkillRecord]:
+        """List all active draft records originating from a specific task."""
+        return [
+            r for r in self._read_registry()
+            if r.tier == "draft" and r.task_origin == task_origin and r.status == "active"
+        ]
+
     def get_by_ids(self, ids: List[str]) -> List[SkillRecord]:
         target = set(ids)
         return [r for r in self._read_registry() if r.id in target]
 
     def find_by_fingerprint(self, fingerprint: str, category: str) -> Optional[SkillRecord]:
         for r in self._read_registry():
-            if r.category == category and r.fingerprint == fingerprint:
+            if r.category == category and r.fingerprint == fingerprint and r.status == "active":
                 return r
         return None
 
@@ -146,12 +198,13 @@ class FileSkillStore:
         self._write_skill_file(record)
         return record
 
-    def promote(self, record_id: str) -> Optional[SkillRecord]:
+    def promote_to_permanent(self, record_id: str) -> Optional[SkillRecord]:
+        """Promote a draft skill to permanent tier."""
         records = self._read_registry()
         target: Optional[SkillRecord] = None
         for i, r in enumerate(records):
             if r.id == record_id:
-                r.status = "active"
+                r.tier = "permanent"
                 r.updated_at = now_ts()
                 records[i] = r
                 target = r
@@ -161,33 +214,32 @@ class FileSkillStore:
             self._write_skill_file(target)
         return target
 
-    def record_feedback(
-        self,
-        knowledge_ids: List[str],
-        *,
-        success: bool,
-        success_delta: float,
-        failure_delta: float,
-    ) -> None:
-        if not knowledge_ids:
-            return
-        target = set(knowledge_ids)
+    def delete_draft_skills_for_task(self, task_origin: str) -> int:
+        """Archive all remaining draft skills for a task. Returns count deleted."""
         records = self._read_registry()
-        changed = False
+        count = 0
         for r in records:
-            if r.id not in target:
-                continue
-            r.usage_count += 1
-            if success:
-                r.success_count += 1
-                r.score += success_delta
-            else:
-                r.failure_count += 1
-                r.score += failure_delta
-            r.updated_at = now_ts()
-            changed = True
-        if changed:
+            if r.tier == "draft" and r.task_origin == task_origin and r.status == "active":
+                r.status = "archived"
+                r.updated_at = now_ts()
+                count += 1
+        if count:
             self._write_registry(records)
+        return count
+
+    def overwrite_record(self, record_id: str, updated: SkillRecord) -> SkillRecord:
+        """Overwrite the content of an existing record with merged content."""
+        records = self._read_registry()
+        for i, r in enumerate(records):
+            if r.id == record_id:
+                updated.id = r.id
+                updated.created_at = r.created_at
+                updated.updated_at = now_ts()
+                records[i] = updated
+                self._write_registry(records)
+                self._write_skill_file(updated)
+                return updated
+        raise ValueError(f"Record {record_id} not found")
 
     def add_code_snippet(self, slug: str, content: str) -> str:
         path = self.code_pool_dir / f"{slug}.py"
@@ -196,26 +248,32 @@ class FileSkillStore:
 
     # ---- SKILL.md rendering ----
     def _write_skill_file(self, record: SkillRecord) -> None:
-        base = self.active_dir if record.status == "active" else self.draft_dir
+        if record.status == "archived":
+            # Remove files for archived records
+            for base in (self.active_dir, self.draft_dir):
+                target = base / record.slug
+                if target.exists():
+                    shutil.rmtree(target)
+            return
+
+        base = self.active_dir if record.tier == "permanent" else self.draft_dir
         skill_dir = base / record.slug
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(self.render_markdown(record), encoding="utf-8")
 
-        if record.status == "active":
-            draft = self.draft_dir / record.slug
-            if draft.exists() and draft != skill_dir:
-                shutil.rmtree(draft)
-        else:
-            active = self.active_dir / record.slug
-            if active.exists():
-                shutil.rmtree(active)
+        # Clean up the other tier's directory if it exists
+        other_base = self.draft_dir if record.tier == "permanent" else self.active_dir
+        other_dir = other_base / record.slug
+        if other_dir.exists() and other_dir != skill_dir:
+            shutil.rmtree(other_dir)
 
     def render_markdown(self, record: SkillRecord) -> str:
         frontmatter = {
             "name": record.slug,
             "description": record.description,
             "category": record.category,
-            "agent-scope": record.agent_scope,
+            "scope": record.scope,
+            "tier": record.tier,
             "user-invocable": False,
             "disable-model-invocation": False,
         }
@@ -240,10 +298,9 @@ class FileSkillStore:
             "id": record.id,
             "name": record.title,
             "category": record.category,
-            "status": record.status,
-            "agent_scope": record.agent_scope,
+            "tier": record.tier,
+            "scope": record.scope,
             "instructions": record.instructions,
             "code_snippet_path": record.code_snippet_path,
             "tags": list(record.tags),
-            "credit_score": record.score,
         }
