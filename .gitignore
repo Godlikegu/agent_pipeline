@@ -5,3 +5,5 @@ tests/_tmp/
 prompt_optimizer/optimized_prompts/
 artifacts/
 tests/
+skills/library/
+data/
