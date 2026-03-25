@@ -214,12 +214,19 @@ class FileSkillStore:
             self._write_skill_file(target)
         return target
 
-    def delete_draft_skills_for_task(self, task_origin: str) -> int:
-        """Archive all remaining draft skills for a task. Returns count deleted."""
+    def delete_draft_skills_for_task(self, task_origin: str, exclude_ids: set = None) -> int:
+        """Archive all remaining draft skills for a task. Returns count deleted.
+
+        Args:
+            task_origin: Task name whose drafts to clean up.
+            exclude_ids: Set of skill IDs to exclude from deletion (e.g., newly distilled).
+        """
+        exclude = exclude_ids or set()
         records = self._read_registry()
         count = 0
         for r in records:
-            if r.tier == "draft" and r.task_origin == task_origin and r.status == "active":
+            if (r.tier == "draft" and r.task_origin == task_origin
+                    and r.status == "active" and r.id not in exclude):
                 r.status = "archived"
                 r.updated_at = now_ts()
                 count += 1

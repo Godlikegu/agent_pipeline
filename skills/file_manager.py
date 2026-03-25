@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -378,31 +379,37 @@ class FileSkillManager:
             promoted.append(skill_id)
         return promoted
 
-    def cleanup_draft_skills(self, task_name: str) -> int:
-        """Delete (archive) all remaining draft skills for a task."""
-        return self.store.delete_draft_skills_for_task(task_name)
+    def cleanup_draft_skills(self, task_name: str, exclude_ids: set = None) -> int:
+        """Delete (archive) all remaining draft skills for a task, excluding specified IDs."""
+        return self.store.delete_draft_skills_for_task(task_name, exclude_ids=exclude_ids)
 
     # ------------------------------------------------------------------
     # Similarity helpers (embedding-only)
     # ------------------------------------------------------------------
     def _compute_similarity(self, text_a: str, text_b: str) -> float:
-        """Compute embedding cosine similarity between two texts."""
-        if self.embedder is None:
-            return 0.0
-        try:
-            vec_a = np.array(self.embedder.encode(text_a, normalize_embeddings=True), dtype=np.float32)
-            vec_b = np.array(self.embedder.encode(text_b, normalize_embeddings=True), dtype=np.float32)
-            return float(np.dot(vec_a, vec_b))
-        except Exception:
-            return 0.0
+        """Compute similarity between two texts. Uses embedding if available, TF-IDF fallback."""
+        if self.embedder is not None:
+            try:
+                vec_a = np.array(self.embedder.encode(text_a, normalize_embeddings=True), dtype=np.float32)
+                vec_b = np.array(self.embedder.encode(text_b, normalize_embeddings=True), dtype=np.float32)
+                return float(np.dot(vec_a, vec_b))
+            except Exception:
+                pass
+        # TF-IDF fallback
+        scores = self._tfidf_similarity(text_a, [text_b])
+        return scores[0] if scores else 0.0
 
     def _rank_by_similarity(
         self, query: str, records: List[SkillRecord]
     ) -> List[Tuple[float, SkillRecord]]:
-        """Rank records by embedding similarity. Returns sorted (score, record) pairs."""
+        """Rank records by similarity. Uses embedding if available, TF-IDF fallback otherwise."""
         if not query or not records:
             return []
-        sims = self._embed_similarity(query, records)
+        texts = [self._record_text(r) for r in records]
+        if self.embedder is not None:
+            sims = self._embed_similarity(query, records)
+        else:
+            sims = self._tfidf_similarity(query, texts)
         ranked = [(sims[i], r) for i, r in enumerate(records)]
         ranked.sort(key=lambda x: x[0], reverse=True)
         return ranked
@@ -428,3 +435,60 @@ class FileSkillManager:
             except Exception:
                 scores.append(0.0)
         return scores
+
+    def _tfidf_similarity(self, query: str, docs: list) -> List[float]:
+        """TF-IDF cosine similarity fallback when embedder is unavailable."""
+        docs = list(docs)
+        if not docs:
+            return []
+        q_tok = self._tokenize(query)
+        d_toks = [self._tokenize(d) for d in docs]
+        if not q_tok:
+            return [0.0] * len(docs)
+
+        df: dict = {}
+        for toks in [q_tok, *d_toks]:
+            for t in set(toks):
+                df[t] = df.get(t, 0) + 1
+        n = len(d_toks) + 1
+
+        def vec(tokens):
+            cnt: dict = {}
+            for t in tokens:
+                cnt[t] = cnt.get(t, 0) + 1
+            return {t: (c / max(len(tokens), 1)) * (math.log((n + 1) / (df.get(t, 0) + 1)) + 1)
+                    for t, c in cnt.items()}
+
+        qv = vec(q_tok)
+        results: list[float] = []
+        for toks in d_toks:
+            dv = vec(toks)
+            common = set(qv) & set(dv)
+            if not common:
+                results.append(0.0)
+                continue
+            dot = sum(qv[t] * dv[t] for t in common)
+            nq = math.sqrt(sum(v * v for v in qv.values()))
+            nd = math.sqrt(sum(v * v for v in dv.values()))
+            results.append(dot / ((nq * nd) or 1e-8))
+        return results
+
+    @staticmethod
+    def _tokenize(text: str) -> list:
+        clean = (text or "").lower()
+        tokens: list = []
+        cur: list = []
+        for c in clean:
+            if c.isalnum() or c == "_":
+                cur.append(c)
+            else:
+                if cur:
+                    tok = "".join(cur)
+                    if len(tok) > 2:
+                        tokens.append(tok)
+                    cur = []
+        if cur:
+            tok = "".join(cur)
+            if len(tok) > 2:
+                tokens.append(tok)
+        return tokens

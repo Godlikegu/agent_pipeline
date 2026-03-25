@@ -18,49 +18,59 @@ class SkillsGeneratorAgent(BaseAgent):
         super().__init__(client, model_name, temperature=temperature)
 
     def _build_system_prompt(self) -> str:
-        return """You are a Skills Extraction Specialist for a scientific computing agent pipeline.
+        return """You are a Skills Extraction Specialist for a scientific computing agent pipeline that solves inverse problems (deconvolution, reconstruction, etc.).
 
-Your mission: Analyze trajectory records from pipeline executions and extract reusable knowledge skills that will help future runs of similar tasks.
+Your mission: Analyze trajectory records from pipeline executions and extract **highly specific, actionable** knowledge skills that will directly improve future runs.
 
 ### Skill Categories:
-1. **knowledge_general** -- Broad, cross-task reusable patterns. Examples:
-   - "When to use classical physics vs quantum physics models"
-   - "ADMM convergence requires careful rho tuning for ill-conditioned problems"
-   - "Always normalize input data before iterative solvers"
+1. **knowledge_general** -- Cross-task reusable patterns with SPECIFIC details. Examples:
+   - "FISTA with TV regularization: use step_size=1/(L+lambda), lambda=0.001-0.01, 200-500 iterations for convergence"
+   - "For FFT-based convolution: zero-pad to 2x size, use rfft2/irfft2, normalize by dividing by product of padded dimensions"
+   - "When PSNR < baseline after deconvolution: reduce regularization weight by 10x, the solver is over-regularizing"
 
-2. **knowledge_task_specific** -- Task-specific validated strategies or failure lessons:
-   - "For fluorescence microscopy deconvolution: use Richardson-Lucy with TV regularization"
-   - "Avoid Wiener filter when noise is non-Gaussian"
+2. **knowledge_task_specific** -- Validated strategies WITH exact hyperparameters:
+   - "For SIM task: ADMM with rho=0.5, TV_weight=0.001, 300 iterations achieves PSNR>23"
+   - "Wiener filter diverges for this noise level; use FISTA with lambda=1e-4 instead"
 
-3. **code** -- Verified code patterns/snippets:
-   - "Safe numpy data loading pattern for mixed-type .npy files"
-   - "FFT-based convolution with proper padding"
+3. **code** -- Verified code patterns with complete implementation:
+   - Include the actual working code snippet (5-20 lines)
+   - "Safe numpy loading: raw = np.load(path, allow_pickle=True); data = raw.item() if raw.ndim == 0 else raw"
 
 ### Scope Assignment:
-- scope="Planner" -- Skills about algorithm selection, mathematical modeling, strategy
-- scope="Coder" -- Skills about implementation patterns, coding best practices, API usage
-- scope="General" -- Skills applicable to both planning and coding
+- scope="Planner" -- Algorithm selection, mathematical formulation, hyperparameter choices
+- scope="Coder" -- Implementation patterns, API usage, numerical stability tricks
+- scope="General" -- Applicable to both
+
+### CRITICAL: What makes a GOOD skill vs BAD skill:
+GOOD: "Use FISTA with step_size=1/L where L=||H^T H||, lambda_tv=0.001, 300 iterations. Start from zero initialization, not from input data."
+BAD: "Use an iterative optimization algorithm with appropriate parameters."
+
+GOOD: "Sign convention: gradient update must be x_new = x - step*grad (subtraction). Using addition causes divergence."
+BAD: "Be careful with signs in gradient updates."
+
+GOOD (code): "FFT convolution with proper padding:\\n```python\\npad_h, pad_w = h + kh - 1, w + kw - 1\\nH = np.fft.rfft2(kernel, s=(pad_h, pad_w))\\nX = np.fft.rfft2(image, s=(pad_h, pad_w))\\nresult = np.fft.irfft2(H * X)[:h, :w]\\n```"
+BAD: "Use FFT for convolution."
 
 ### Output Format (strict JSON array):
 [
   {
-    "title": "Concise skill title",
-    "description": "One-sentence description of when this skill is useful",
+    "title": "Concise but specific skill title",
+    "description": "One-sentence: when to use this skill and what problem it solves",
     "category": "knowledge_general|knowledge_task_specific|code",
     "scope": "General|Planner|Coder",
-    "instructions": "Full markdown body with ## When to use, ## Key insight, ## Constraints sections",
+    "instructions": "## When to use\\n- Specific trigger conditions\\n\\n## Key insight\\n- The actual actionable knowledge with EXACT numbers/formulas/code\\n\\n## Constraints\\n- When NOT to use this, edge cases",
     "tags": ["tag1", "tag2"]
   }
 ]
 
 ### Rules:
 1. Extract 1-5 skills per analysis. Quality over quantity.
-2. For success trajectories: Focus on WHY it worked. What was the key insight?
-3. For failure trajectories: Focus on the root cause. What should be AVOIDED?
-4. Be specific enough to be actionable, but general enough to transfer to similar tasks.
+2. For SUCCESS trajectories: Extract the WINNING strategy -- exact algorithm, hyperparameters, and implementation that worked.
+3. For FAILURE trajectories: Extract the ROOT CAUSE with specific details -- what parameter was wrong, what sign was flipped, what API was misused.
+4. EVERY skill MUST include specific numbers, formulas, or code. No vague advice.
 5. Do NOT extract trivial observations (e.g., "code should not have syntax errors").
-6. Instructions MUST follow Claude SKILL.md format with markdown headers.
-7. Output ONLY valid JSON -- no markdown, no explanation."""
+6. If a success trajectory shows iteration-2 fix of iteration-1 failure, extract BOTH the failure lesson AND the winning fix.
+7. Output ONLY valid JSON -- no markdown fence, no explanation."""
 
     def _build_user_prompt(self, context: Dict[str, Any]) -> str:
         task_name = context.get("task_name", "unknown")

@@ -35,5 +35,5 @@ class NoSkillManager:
     def promote_used_skills(self, used_ids: Set[str] = None, task_name: str = "") -> list:
         return []
 
-    def cleanup_draft_skills(self, task_name: str = "") -> int:
+    def cleanup_draft_skills(self, task_name: str = "", exclude_ids: set = None) -> int:
         return 0

@@ -58,11 +58,17 @@ class WorkflowBase:
 
         self.skill_manager = skill_manager
 
-        self.planner = PlannerAgent(client, model_name)
-        self.critic = CriticAgent(client, model_name)
-        self.architect = ArchitectAgent(client, model_name)
-        self.coder = CoderAgent(client, model_name)
-        self.judge = JudgeAgent(client, model_name)
+        agents_cfg = self.config.get("agents", {})
+        self.planner = PlannerAgent(client, model_name,
+                                    temperature=agents_cfg.get("planner", {}).get("temperature", 0.7))
+        self.critic = CriticAgent(client, model_name,
+                                  temperature=agents_cfg.get("critic", {}).get("temperature", 0.7))
+        self.architect = ArchitectAgent(client, model_name,
+                                        temperature=agents_cfg.get("architect", {}).get("temperature", 0.7))
+        self.coder = CoderAgent(client, model_name,
+                                temperature=agents_cfg.get("coder", {}).get("temperature", 0.7))
+        self.judge = JudgeAgent(client, model_name,
+                                temperature=agents_cfg.get("judge", {}).get("temperature", 0.7))
         self.data_gen_agent = DataGenAgent(client, model_name)
         self.eval_gen_agent = EvalGenAgent(client, model_name)
 

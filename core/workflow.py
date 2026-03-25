@@ -535,8 +535,8 @@ class PipelineWorkflow(WorkflowBase):
                     )
                     self._log(f"  [Skills] Promoted {len(promoted)} used draft skills to permanent.")
 
-                # 4. Cleanup: delete all remaining drafts for this task
-                deleted = self.skill_manager.cleanup_draft_skills(self.task_name)
+                # 4. Cleanup: delete remaining drafts for this task, but EXCLUDE newly distilled ones
+                deleted = self.skill_manager.cleanup_draft_skills(self.task_name, exclude_ids=new_skill_ids)
                 self._log(f"  [Skills] Cleaned up {deleted} remaining draft skills for task '{self.task_name}'.")
 
             else:

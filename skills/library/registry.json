@@ -1,1 +1,253 @@
-[]
+[
+  {
+    "id": "sk-fe3e1cba48d2",
+    "slug": "pytorch-ad-based-optimization-use-torch-stack-not-in-place-tensor-assignment-for-gradient-flow",
+    "title": "PyTorch AD-based optimization: use torch.stack() not in-place tensor assignment for gradient flow",
+    "description": "When building batched tensors from loop iterations in PyTorch autograd, pre-allocating with torch.zeros then assigning via indexing (patches[i] = ...) breaks the computational graph and prevents gradient backpropagation.",
+    "category": "code",
+    "tier": "draft",
+    "scope": "Coder",
+    "status": "active",
+    "instructions": "## When to use\n- Any time you build a batch of tensors in a loop where the source tensors require gradients\n- Specifically in ptychographic reconstruction: _crop_object_patch, _shift_probe, or any batched extraction from nn.Parameters\n\n## Key insight\nNEVER do this:\npython\npatches = torch.zeros((B, H, W), dtype=torch.complex64, device=device)\nfor i in range(B):\n    patches[i] = some_differentiable_op(...)  # BREAKS autograd graph\n\n\nINSTEAD do this:\npython\npatches_list = []\nfor i in range(B):\n    patches_list.append(some_differentiable_op(...))\npatches = torch.stack(patches_list, dim=0)  # Preserves autograd graph\n\n\nOr equivalently:\npython\npatches = torch.stack([some_differentiable_op(...) for i in range(B)], dim=0)\n\n\n## Constraints\n- torch.stack creates a new tensor with proper gradient tracking\n- In-place operations on pre-allocated tensors detach the computation graph\n- This applies to ALL in-place indexed assignments, not just simple slicing",
+    "tags": [
+      "pytorch",
+      "autograd",
+      "gradient-flow",
+      "batching",
+      "in-place-ops"
+    ],
+    "source_tasks": [
+      "ptyrad"
+    ],
+    "task_origin": "ptyrad",
+    "code_snippet_path": null,
+    "fingerprint": "435ce13b5f1968f72cdba21786635fce",
+    "created_at": 1774454271,
+    "updated_at": 1774454271
+  },
+  {
+    "id": "sk-7e454442014b",
+    "slug": "ptychographic-reconstruction-loss-global-normalization-not-per-pattern-normalization",
+    "title": "Ptychographic reconstruction loss: global normalization not per-pattern normalization",
+    "description": "For amplitude-domain ptychographic loss, averaging must be over all pixels and batch positions together (global), not per-pattern normalization followed by batch averaging, which causes incorrect gradient scaling.",
+    "category": "knowledge_task_specific",
+    "tier": "draft",
+    "scope": "Coder",
+    "status": "active",
+    "instructions": "## When to use\n- Implementing loss functions for ptychographic reconstruction with amplitude-domain (p=0.5) formulation\n\n## Key insight\nCorrect loss (Plan Eq. 5):\npython\n# I_model_p and I_meas_p are (B, Nx, Ny) tensors raised to power p=0.5\ndiff = I_model_p - I_meas_p\nloss = torch.sqrt(torch.mean(diff ** 2)) / (torch.mean(I_meas_p) + epsilon)\n\nHere `torch.mean` flattens over ALL dimensions (batch + spatial).\n\nINCORRECT (per-pattern normalization):\npython\n# DO NOT DO THIS:\nfor each pattern:\n    rms = sqrt(mean(diff_i^2))  # per-pattern\n    norm = mean(I_meas_i^p)     # per-pattern\n    loss_i = rms / norm\nloss = mean(loss_i)  # averaging normalized losses\n\nPer-pattern normalization gives different gradient weights to different patterns, distorting optimization.\n\n## Constraints\n- epsilon ~1e-6 needed in denominator to prevent division by zero\n- p=0.5 (amplitude domain) compresses dynamic range and is standard for ptychography",
+    "tags": [
+      "ptychography",
+      "loss-function",
+      "normalization",
+      "amplitude-domain"
+    ],
+    "source_tasks": [
+      "ptyrad"
+    ],
+    "task_origin": "ptyrad",
+    "code_snippet_path": null,
+    "fingerprint": "51ea6bec1e75674616df94ec2c6a9b96",
+    "created_at": 1774454271,
+    "updated_at": 1774454271
+  },
+  {
+    "id": "sk-c60f8c936475",
+    "slug": "probe-normalization-for-ptychographic-reconstruction-intensity-scale-matching",
+    "title": "Probe normalization for ptychographic reconstruction intensity scale matching",
+    "description": "The initial probe must be power-normalized so that simulated diffraction intensities match the scale of measured intensities; without this, the optimizer cannot converge.",
+    "category": "knowledge_task_specific",
+    "tier": "draft",
+    "scope": "Coder",
+    "status": "active",
+    "instructions": "## When to use\n- Initializing probe from a circular Fourier-space aperture for AD-based ptychographic reconstruction\n- When PSNR is far below baseline after many iterations (indicates scale mismatch)\n\n## Key insight\nAfter computing the real-space probe from IFFT of aperture mask, normalize its power:\npython\n# After P_real_space = ifft2(aperture_mask)\nmean_measured_intensity = torch.mean(I_meas)  # scalar\nprobe_power = torch.sum(torch.abs(P_real_space) ** 2)\nscale = torch.sqrt(mean_measured_intensity / (probe_power + 1e-12))\nP_real_space = P_real_space * scale\n\nThis ensures |F[P * O]|^2 is on the same scale as I_meas when object_amp ≈ 1.\n\n## Constraints\n- Must be done BEFORE splitting into real/imag parts for nn.Parameter\n- If object amplitude is initialized to values != 1.0, adjust accordingly\n- k_max=0.25 (quarter Nyquist) is a reasonable default for the aperture radius",
+    "tags": [
+      "ptychography",
+      "probe-initialization",
+      "normalization",
+      "scale-matching"
+    ],
+    "source_tasks": [
+      "ptyrad"
+    ],
+    "task_origin": "ptyrad",
+    "code_snippet_path": null,
+    "fingerprint": "525915708829a79a16adf2af487d1c1e",
+    "created_at": 1774454272,
+    "updated_at": 1774454272
+  },
+  {
+    "id": "sk-27b52b652a44",
+    "slug": "ptychographic-scan-position-grid-for-ad-based-reconstruction",
+    "title": "Ptychographic scan position grid for AD-based reconstruction",
+    "description": "For single-slice ptychography with N_pos diffraction patterns, object size (Nx_O, Ny_O), and probe size (Nx_P, Ny_P), compute scan positions as a regular grid with sufficient overlap.",
+    "category": "knowledge_task_specific",
+    "tier": "draft",
+    "scope": "Planner",
+    "status": "active",
+    "instructions": "## When to use\n- Setting up scan geometry for ptychographic reconstruction when positions are not provided in metadata\n- Input shape (N_pos, Nx_P, Ny_P), output shape (Nx_O, Ny_O)\n\n## Key insight\n- Grid side = int(sqrt(N_pos)), e.g., 64 positions → 8×8 grid\n- Step = (obj_size - probe_size) / (grid_side - 1)\n- For 128×128 object, 64×64 probe, 8×8 grid: step ≈ 9.14 pixels\n- Overlap ratio = 1 - step/probe_size ≈ 87.5% (typical for ptychography)\n- Use torch.linspace(0, obj_size - probe_size, grid_side) for positions\n- Positions represent top-left corner of each probe window\n- Use float positions to allow sub-pixel shifting via Fourier phase ramp\n\n## Constraints\n- N_pos must be a perfect square for regular grid assumption\n- If not perfect square, consider rectangular grid or spiral scan\n- Overlap should be >60% for convergence; <50% causes artifacts",
+    "tags": [
+      "ptychography",
+      "scan-geometry",
+      "positions",
+      "overlap"
+    ],
+    "source_tasks": [
+      "ptyrad"
+    ],
+    "task_origin": "ptyrad",
+    "code_snippet_path": null,
+    "fingerprint": "5ad93f57defdad38e7f0bd2a43510612",
+    "created_at": 1774454272,
+    "updated_at": 1774454272
+  },
+  {
+    "id": "sk-8e8f0f23f761",
+    "slug": "ad-based-ptychography-hyperparameters-adam-optimizer-with-onset-scheduling",
+    "title": "AD-based ptychography hyperparameters: Adam optimizer with onset scheduling",
+    "description": "For gradient-based ptychographic reconstruction using Adam, use differentiated learning rates and onset iterations for object amplitude, object phase, and probe to avoid early divergence.",
+    "category": "knowledge_task_specific",
+    "tier": "draft",
+    "scope": "Planner",
+    "status": "active",
+    "instructions": "## When to use\n- Setting up Adam optimizer for single-slice ptychographic reconstruction\n- When reconstruction produces PSNR below baseline (12-13 dB range)\n\n## Key insight\nRecommended hyperparameters:\n- lr_obj_phase = 1e-2, onset = 0 (optimize from start)\n- lr_obj_amp = 1e-3, onset = 10 (delay amplitude optimization)\n- lr_probe = 1e-1, onset = 10 (delay probe optimization)\n- batch_size = 16 (out of 64 total positions)\n- n_iterations = 200-500\n- p_power = 0.5 (amplitude domain loss)\n- adam_betas = (0.9, 0.999)\n- Object amplitude clamped to [0.0, 2.0] after each step\n- Probe Fourier mask applied every 5 iterations to enforce bandlimit\n\nKey scheduling: Start with object phase only, then enable amplitude and probe after ~10 iterations. This prevents the probe from absorbing object features early on.\n\n## Constraints\n- These values assume normalized probe power matching measured intensity scale\n- If probe is not normalized, lr_probe may need to be reduced by 10-100x\n- More iterations (500+) may be needed for noisy data",
+    "tags": [
+      "ptychography",
+      "adam",
+      "hyperparameters",
+      "learning-rate",
+      "onset-scheduling"
+    ],
+    "source_tasks": [
+      "ptyrad"
+    ],
+    "task_origin": "ptyrad",
+    "code_snippet_path": null,
+    "fingerprint": "19991baec2b0bab301560a8078feefea",
+    "created_at": 1774454272,
+    "updated_at": 1774454272
+  },
+  {
+    "id": "sk-740640d30052",
+    "slug": "epie-ptychographic-reconstruction-requires-rpie-updates-and-probe-support-constraints-for-acceptable-quality",
+    "title": "ePIE ptychographic reconstruction requires rPIE updates and probe support constraints for acceptable quality",
+    "description": "Basic ePIE with max(|P|^2) denominator and no probe constraints yields PSNR~12.8/SSIM~0.25 on ptychography tasks; rPIE with Fourier support constraint is necessary for convergence to good solutions.",
+    "category": "knowledge_task_specific",
+    "tier": "draft",
+    "scope": "Planner",
+    "status": "active",
+    "instructions": "## When to use\n- Ptychographic reconstruction from 4D-STEM diffraction data\n- When basic ePIE gives poor PSNR (<15) despite loss decreasing\n\n## Key insight\n- Basic ePIE uses denominator max(|P|^2) which gives uniform step size across the probe footprint. This is suboptimal.\n- rPIE uses denominator (|P|^2 + delta) where delta = (1-alpha)*max(|P|^2), providing spatially-varying updates that converge faster.\n- Critical constraints that MUST be applied every iteration:\n  1. Probe Fourier support: FFT probe, multiply by aperture mask, IFFT back. Without this, probe energy leaks outside physical aperture and reconstruction diverges.\n  2. Object amplitude clipping: clip |O| to [0.0, 1.5] to prevent runaway amplitudes.\n  3. Probe power conservation: renormalize probe power to match mean measured intensity.\n- Use alpha=0.9, beta=0.9 for rPIE step sizes.\n- Need 500+ iterations, not 200.\n\n## Constraints\n- These improvements alone may not be sufficient if scan positions or probe radius are wrong\n- Multi-slice objects require different treatment",
+    "tags": [
+      "ptychography",
+      "ePIE",
+      "rPIE",
+      "probe-constraint",
+      "reconstruction"
+    ],
+    "source_tasks": [
+      "ptyrad"
+    ],
+    "task_origin": "ptyrad",
+    "code_snippet_path": null,
+    "fingerprint": "9fe2d7b8d329530c519b001208365fc5",
+    "created_at": 1774459472,
+    "updated_at": 1774459472
+  },
+  {
+    "id": "sk-f7d7ee0c5d3d",
+    "slug": "probe-aperture-radius-estimation-from-pacbed-for-ptychography-initialization",
+    "title": "Probe aperture radius estimation from PACBED for ptychography initialization",
+    "description": "Incorrect probe radius initialization causes ptychographic reconstruction to converge to wrong solution; estimate radius from position-averaged CBED (PACBED) azimuthal profile.",
+    "category": "knowledge_task_specific",
+    "tier": "draft",
+    "scope": "Planner",
+    "status": "active",
+    "instructions": "## When to use\n- Ptychographic reconstruction where probe parameters are unknown\n- When probe_radius is a free parameter that significantly affects reconstruction quality\n\n## Key insight\n- Compute PACBED: I_pacbed = mean(I_meas, axis=0) over all scan positions\n- Compute azimuthal average of I_pacbed as function of radius from center\n- Find radius where azimuthal average drops to 5% of maximum → this is the probe aperture radius\n- Fallback to radius=16 (for 64x64 detector) if estimate is unreasonable (<5 or >30)\n- Better approach: try multiple candidate radii [10, 13, 16, 19, 22, 25], run 30 iterations of rPIE with each, pick the one with lowest loss\n- Probe construction: create disk mask in Fourier space at estimated radius, ifftshift, IFFT2 to get real-space probe, then scale so sum(|FFT2(P)|^2) = mean(sum(I_meas[j]))\n\n## Constraints\n- This assumes a round aperture (no aberrations in initial estimate)\n- For aberrated probes, the PACBED shape may be non-circular",
+    "tags": [
+      "ptychography",
+      "probe-initialization",
+      "PACBED",
+      "aperture-estimation"
+    ],
+    "source_tasks": [
+      "ptyrad"
+    ],
+    "task_origin": "ptyrad",
+    "code_snippet_path": null,
+    "fingerprint": "945ce8127a90cd11639c6a1690a57eba",
+    "created_at": 1774459472,
+    "updated_at": 1774459472
+  },
+  {
+    "id": "sk-40cd5de1d0de",
+    "slug": "ptychography-scan-position-computation-for-regular-grid",
+    "title": "Ptychography scan position computation for regular grid",
+    "description": "Scan positions must be computed as top-left crop coordinates covering the object-probe overlap region; incorrect positions cause complete reconstruction failure.",
+    "category": "code",
+    "tier": "draft",
+    "scope": "Coder",
+    "status": "active",
+    "instructions": "## When to use\n- Setting up scan positions for ptychographic reconstruction with known grid size\n- Object shape (Nx_O, Ny_O), probe shape (Nx_P, Ny_P), grid size (Gr, Gc)\n\n## Key insight\npython\n# Scan positions as top-left crop coordinates for 8x8 grid\n# object 128x128, probe 64x64\nNx_O, Ny_O = 128, 128\nNx_P, Ny_P = 64, 64\ngrid_rows, grid_cols = 8, 8\n\nmax_row = Nx_O - Nx_P  # = 64\nmax_col = Ny_O - Ny_P  # = 64\n\nrow_pos = np.linspace(0, max_row, grid_rows)  # [0, 9.14, ..., 64]\ncol_pos = np.linspace(0, max_col, grid_cols)\n\ncol_grid, row_grid = np.meshgrid(col_pos, row_pos)\npositions = np.stack([row_grid.ravel(), col_grid.ravel()], axis=1)  # (64, 2)\ncrop_positions = np.round(positions).astype(int)\ncrop_positions = np.clip(crop_positions, 0, [max_row, max_col])\n\n- Step size = 64/7 ≈ 9.14 pixels gives ~86% overlap — sufficient for ptychography\n- Positions are (row, col) = top-left corner of probe crop window in object array\n\n## Constraints\n- Positions must be clipped to valid range [0, object_size - probe_size]\n- For non-square grids, compute row and col positions independently",
+    "tags": [
+      "ptychography",
+      "scan-positions",
+      "grid-computation"
+    ],
+    "source_tasks": [
+      "ptyrad"
+    ],
+    "task_origin": "ptyrad",
+    "code_snippet_path": null,
+    "fingerprint": "177c4468bb24768ea828f18c47371994",
+    "created_at": 1774459472,
+    "updated_at": 1774459472
+  },
+  {
+    "id": "sk-c7b9fa56a073",
+    "slug": "ptychography-phase-output-use-mean-subtraction-not-plane-fit-ramp-removal",
+    "title": "Ptychography phase output: use mean subtraction not plane-fit ramp removal",
+    "description": "Aggressive phase ramp removal (full linear plane fit) can destroy low-frequency phase information in ptychographic reconstructions; use only mean phase subtraction.",
+    "category": "knowledge_task_specific",
+    "tier": "draft",
+    "scope": "Coder",
+    "status": "active",
+    "instructions": "## When to use\n- Post-processing the reconstructed object phase before outputting the result\n- When SSIM is low despite reasonable-looking reconstruction\n\n## Key insight\n- Phase from ptychography has an arbitrary global offset (gauge freedom)\n- Only subtract the mean phase: `phase = np.angle(O); phase -= np.mean(phase)`\n- Do NOT fit and remove a linear plane (ax + by + c) — this removes real phase gradients that may be part of the ground truth\n- If the evaluation metric compares against a reference that also has arbitrary offset, mean subtraction is sufficient\n\n## Constraints\n- If there is a known phase ramp artifact from position errors, targeted ramp removal may be appropriate\n- For thick samples with large phase gradients, even mean subtraction should be done carefully",
+    "tags": [
+      "ptychography",
+      "phase-retrieval",
+      "post-processing"
+    ],
+    "source_tasks": [
+      "ptyrad"
+    ],
+    "task_origin": "ptyrad",
+    "code_snippet_path": null,
+    "fingerprint": "8f73b40971c1f044d97f4d861cf67580",
+    "created_at": 1774459472,
+    "updated_at": 1774459472
+  },
+  {
+    "id": "sk-c70ba207ff24",
+    "slug": "complex-pipeline-with-many-hyperparameters-needs-working-baseline-before-adding-features",
+    "title": "Complex pipeline with many hyperparameters needs working baseline before adding features",
+    "description": "When implementing a complex reconstruction algorithm (rPIE + constraints + position refinement + auto-tuning), implement and validate the core algorithm first before adding advanced features to avoid compounding bugs.",
+    "category": "knowledge_general",
+    "tier": "draft",
+    "scope": "General",
+    "status": "active",
+    "instructions": "## When to use\n- Task requires implementing a multi-component algorithm (e.g., rPIE + probe support + amplitude clipping + position refinement + probe radius tuning)\n- Previous round failed with basic implementation and plan calls for many simultaneous improvements\n\n## Key insight\n- Both rounds failed on ptyrad. Round 1 had basic ePIE that ran but gave poor quality. Round 2 planned many improvements simultaneously (rPIE, probe support, amplitude clipping, position refinement, multi-resolution, probe radius auto-tuning) — this is too many changes at once.\n- Strategy: Implement in priority order, validate each:\n  1. First: Get rPIE update working (change denominator from max(|P|^2) to |P|^2 + delta)\n  2. Second: Add probe Fourier support constraint (FFT→mask→IFFT every iteration)\n  3. Third: Add object amplitude clipping (clip |O| to [0, 1.5])\n  4. Fourth: Increase iterations to 500\n  5. Only then: Add position refinement, probe radius tuning\n- Each addition should be testable independently\n\n## Constraints\n- Don't skip the core algorithm fixes to add fancy features\n- If the architect skeleton is too complex, the coder may produce buggy code for all components simultaneously",
+    "tags": [
+      "implementation-strategy",
+      "debugging",
+      "incremental-development",
+      "ptychography"
+    ],
+    "source_tasks": [
+      "ptyrad"
+    ],
+    "task_origin": "ptyrad",
+    "code_snippet_path": null,
+    "fingerprint": "113b36ebfa28217044623981e2e87013",
+    "created_at": 1774459472,
+    "updated_at": 1774459472
+  }
+]

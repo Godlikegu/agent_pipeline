@@ -197,11 +197,12 @@ CRITICAL REMINDERS:
         context_for_llm = {
             'package_list': context.get('package_list', 'torch, numpy, math'),
             'plan': context['plan'],
-            'task_desc': context.get('task_desc', ''),  # ✅ Added for skill context
-            'current_code': full_code,  # ✅ Critical: Always pass current full code state
+            'task_desc': context.get('task_desc', ''),
+            'current_code': full_code,
             'target_type': target_type,
             'target_function': target_name,
-            'feedback': context.get('feedback', '')
+            'feedback': context.get('feedback', ''),
+            'knowledge_context': context.get('knowledge_context', ''),
         }
 
         # 生成代码（LLM 基于完整上下文生成）
