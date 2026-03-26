@@ -7,3 +7,4 @@ artifacts/
 tests/
 skills/library/
 data/
+.claude/
