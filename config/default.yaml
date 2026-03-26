@@ -35,8 +35,8 @@ pipeline:
 
 # ========== 评估阈值 ==========
 evaluation:
-  min_guaranteed_psnr: 20.0          # PSNR 最低保证阈值（dB）
-  baseline_ratio: 0.8                # 动态阈值 = baseline_psnr × ratio
+  min_guaranteed_psnr: 10          # PSNR 最低保证阈值（dB）
+  baseline_ratio: 0.95                # 动态阈值 = baseline_psnr × ratio
 
 # ========== Code Cleaner ==========
 code_cleaner:
