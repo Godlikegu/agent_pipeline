@@ -1,0 +1,6 @@
+tasks:
+- name: fourier_ptychography
+  python_path: D:\yan1\agent\agent_pipeline\test_conda_envs\task_fourier_ptychography\python.exe
+  sandbox_dir: ./test_sandbox/fourier_ptychography
+  task_dir: ./data/tasks/fourier_ptychography
+  task_description_path: data/tasks/fourier_ptychography/README.md

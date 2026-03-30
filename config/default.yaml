@@ -35,8 +35,8 @@ pipeline:
 
 # ========== 评估阈值 ==========
 evaluation:
-  min_guaranteed_psnr: 10          # PSNR 最低保证阈值（dB）
-  baseline_ratio: 0.95                # 动态阈值 = baseline_psnr × ratio
+  min_ncc: 0.85                      # NCC >= 0.85 通过
+  max_nrmse: 0.5                     # NRMSE <= 0.5 通过
 
 # ========== Code Cleaner ==========
 code_cleaner:
@@ -49,11 +49,19 @@ code_cleaner:
   data_gen_timeout: 180              # 数据/测试脚本生成执行超时（秒）
   data_gen_max_retries: 5            # 数据生成最大重试
   gt_code_snippet_limit: 4000        # GT 代码截取字符数
+  env_setup:
+    conda_path: null                   # null = 自动检测
+    envs_dir: "./test_conda_envs"      # 环境存放目录（--prefix 模式）
+    python_version: "3.10"
+    env_prefix: "task_"                # 环境命名前缀: task_<folder_name>
+    max_fix_retries: 3                 # LLM 诊断修复最大轮次
+    pip_install_timeout: 300           # pip install 超时（秒）
+    verify_timeout: 30                 # import 验证超时（秒）
 
 # ========== Skills 系统 ==========
 skills:
-  retrieval_enabled: true            # 只读开关：允许检索已有 skills（default=true）
-  learning_enabled: true            # 可写开关：允许从轨迹学习（default=false，implies retrieval_enabled=true）
+  retrieval_enabled: false            # 只读开关：允许检索已有 skills（default=true）
+  learning_enabled: false            # 可写开关：允许从轨迹学习（default=false，implies retrieval_enabled=true）
   retrieval:
     max_token_budget: 2000           # 检索 token 预算上限
     similarity_threshold: 0.60       # 注入的相似度门槛（embedding cosine sim）
