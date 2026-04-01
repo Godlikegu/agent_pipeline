@@ -55,16 +55,17 @@ def get_full_response(client, model, messages, max_loops=5, max_tokens=32768, te
             if "deepseek" in model.lower() and "extra_body" not in request_kwargs:
                 request_kwargs["extra_body"] = {"response_format": {"type": "text"}}
             
-            # 调用 API（带简单重试机制）
-            for retry in range(3):
+            # 调用 API（带重试机制，更长退避应对连接问题）
+            for retry in range(5):
                 try:
                     response = client.chat.completions.create(**request_kwargs)
                     break
                 except Exception as e:
-                    if retry == 2:
+                    if retry == 4:
                         raise
-                    print(f"[WARN] Retry {retry+1}/3 after error: {e}")
-                    time.sleep(1 << retry)  # 指数退避
+                    wait = min(2 ** retry * 3, 60)  # 3s, 6s, 12s, 24s
+                    print(f"[WARN] Retry {retry+1}/5 after error: {e}")
+                    time.sleep(wait)
             
             # 解析响应
             choice = response.choices[0]

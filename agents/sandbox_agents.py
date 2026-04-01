@@ -42,46 +42,61 @@ class DataGenAgent(BaseAgent):
 
 class EvalGenAgent(BaseAgent):
     def _build_system_prompt(self) -> str:
-        return """You are a QA Engineer for Computer Vision/Signal Processing.
-Your Goal: Create an evaluation script `eval_script.py`.
+        return """You are a QA Engineer for Scientific Computing evaluation.
+Your Goal: Create an evaluation script `eval_script.py` that computes NCC and NRMSE.
 Output Format: Return ONLY the Python code.
 
 Requirements:
 1. Accept one command-line argument: path to the prediction file (.npy).
-2. Load `dataset/gt_output.npy` as the reference. Use `np.load(path, allow_pickle=True)` to avoid security errors with complex data types.
-3. Calculate PSNR (Peak Signal-to-Noise Ratio) and SSIM (Structural Similarity).
-   - PREFERRED: Use numpy-based implementations for maximum compatibility:
-     ```
-     def compute_psnr(pred, gt):
-         mse = np.mean((pred.astype(np.float64) - gt.astype(np.float64)) ** 2)
-         if mse == 0: return 100.0
-         max_val = max(np.max(np.abs(gt)), 1e-10)
-         return float(10 * np.log10(max_val ** 2 / mse))
-     ```
-   - Only use `skimage.metrics` if you are SURE it is installed. If not, use the numpy fallback.
-   - For SSIM, a simple correlation-based approximation is acceptable:
-     ```
-     def compute_ssim(pred, gt):
-         pred_f = pred.flatten().astype(np.float64)
-         gt_f = gt.flatten().astype(np.float64)
-         if np.std(pred_f) < 1e-10 or np.std(gt_f) < 1e-10: return 0.0
-         return float(np.corrcoef(pred_f, gt_f)[0, 1])
-     ```
-4. **Metric Guardrails**:
-   - Handle minor shape mismatches gracefully (e.g., squeeze singleton dimensions).
-   - If shapes are fundamentally incompatible, print JSON with shape info.
-5. Print the result strictly in JSON format to stdout: {"psnr": <float>, "ssim": <float>}
+2. Load `dataset/gt_output.npy` as the reference. Use `np.load(path, allow_pickle=True)`.
+3. Calculate NCC (Normalized Cross-Correlation) and NRMSE (Normalized RMSE).
+
+   For COMPLEX data (e.g., ptychography reconstruction where dtype is complex64/complex128):
+   - Extract phase and remove global mean:
+     gt_phase = np.angle(gt) - np.angle(gt).mean()
+     pred_phase = np.angle(pred) - np.angle(pred).mean()
+   - Use the phase arrays for NCC and NRMSE computation.
+
+   For REAL data: use the arrays directly.
+
+   NCC computation:
+     pred_c = pred_arr - pred_arr.mean()
+     gt_c = gt_arr - gt_arr.mean()
+     ncc = np.sum(pred_c * gt_c) / (np.linalg.norm(pred_c) * np.linalg.norm(gt_c) + 1e-10)
+
+   NRMSE computation (normalized by L2 norm of ground truth):
+     nrmse = np.linalg.norm(pred_arr - gt_arr) / (np.linalg.norm(gt_arr) + 1e-10)
+
+4. Handle minor shape mismatches (squeeze singleton dimensions).
+5. Print result strictly as JSON to stdout: {"ncc": <float>, "nrmse": <float>}
    - Print NOTHING ELSE to stdout. No debug messages, no warnings.
+6. Load meta_data.json from dataset/ if available, to determine data type and processing needs.
 """
 
     def _build_user_prompt(self, context: Dict[str, Any]) -> str:
-        return f"""
-        Task: {context['task_desc']}
+        prompt = f"""
+Task: {context['task_desc']}
 
-        Data Shape Hint: {context.get('data_shape_hint', 'N/A')}
+Data Shape Hint: {context.get('data_shape_hint', 'N/A')}
+"""
+        if context.get('meta_data'):
+            import json as _json
+            prompt += f"\nMeta Data (physical parameters, data format info):\n{_json.dumps(context['meta_data'], indent=2, default=str)}\n"
 
-        Please generate `eval_script.py` that calculates PSNR and SSIM between `dataset/gt_output.npy` and the provided prediction file.
-        """
+        # Include evaluation thresholds
+        eval_thresholds = context.get('eval_thresholds', {})
+        if eval_thresholds:
+            prompt += f"\nEvaluation Thresholds (from metrics.json):\n"
+            prompt += f"  - NCC boundary: {eval_thresholds.get('min_ncc', 'N/A')} (NCC >= this value means PASS)\n"
+            prompt += f"  - NRMSE boundary: {eval_thresholds.get('max_nrmse', 'N/A')} (NRMSE <= this value means PASS)\n"
+
+        prompt += """
+Please generate `eval_script.py` that computes NCC and NRMSE between `dataset/gt_output.npy` and the provided prediction file.
+Output JSON: {"ncc": <float>, "nrmse": <float>}
+"""
+        if context.get('feedback'):
+            prompt += f"\n\nPrevious attempt failed: {context['feedback']}"
+        return prompt
 
 def get_installed_libraries(python_path: str) -> str:
     """Detects installed libraries in the environment."""

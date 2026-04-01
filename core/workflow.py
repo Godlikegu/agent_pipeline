@@ -1,10 +1,11 @@
 """
 core/workflow.py -- Main pipeline workflow.
 
-Assumes the sandbox is pre-configured (by code_cleaner) with:
-  - dataset/input.npy, dataset/gt_output.npy, dataset/baseline.npy
+Assumes the sandbox is pre-configured with:
+  - dataset/gt_output.npy, dataset/input_data/, dataset/meta_data.json
   - eval_script.py
 Starts from task_description -> Planner -> Critic -> Architect -> Coder -> Execute -> Judge.
+Evaluates using NCC (Normalized Cross-Correlation) and NRMSE (Normalized RMSE).
 
 Trajectory recording:
   - Each round (Planner->...->Judge) is recorded as a RoundTrajectory.
@@ -15,27 +16,24 @@ import os
 import json
 import time
 import re
+import numpy as np
 from typing import Any
 
 from .workflow_base import WorkflowBase
 from .sandbox import run_cmd
-from code_cleaner.test_harness import load_data_shapes
 from utils.text_utils import extract_json, extract_python
 
 
 class PipelineWorkflow(WorkflowBase):
     def __init__(self, task_name: str, task_desc: str, sandbox_dir: str, python_path: str,
                  client: Any, model_name: str, config: dict = None, skill_manager: Any = None,
-                 max_retries: int = None):
+                 max_retries: int = None, eval_thresholds: dict = None):
         super().__init__(task_name, task_desc, sandbox_dir, python_path, client, model_name,
-                         config, skill_manager, max_retries)
+                         config, skill_manager, max_retries, eval_thresholds=eval_thresholds)
 
     def run(self) -> bool:
-        self.input_shape, self.output_shape = load_data_shapes(self.sandbox_dir, self._log)
-
-        baseline_metrics = self._load_baseline_metrics()
-        self.baseline_metrics = baseline_metrics
-        self._log(f"Baseline metrics: {baseline_metrics}")
+        self.input_shape, self.output_shape = self._load_data_shapes()
+        self.data_layout = self._build_data_layout()
 
         feedback = None
         ticket = "Planner"
@@ -55,6 +53,8 @@ class PipelineWorkflow(WorkflowBase):
                         "task_desc": self.task_desc,
                         "feedback": feedback,
                         "shape_info": f"Input: {self.input_shape}, Output: {self.output_shape}" if self.input_shape else None,
+                        "data_layout": self.data_layout,
+                        "package_list": self.package_list,
                     },
                     agent_role="Planner",
                     current_ticket="Planner",
@@ -98,6 +98,8 @@ class PipelineWorkflow(WorkflowBase):
                         "plan": self.current_plan,
                         "previous_skeleton": self.current_skeleton if self.current_skeleton.strip() else None,
                         "feedback": feedback.get("feedback") if isinstance(feedback, dict) and feedback.get("ticket") == "Architect" else None,
+                        "data_layout": self.data_layout,
+                        "package_list": self.package_list,
                     },
                     agent_role="Architect",
                     current_ticket="Architect",
@@ -152,6 +154,7 @@ class PipelineWorkflow(WorkflowBase):
                         "plan": self.current_plan,
                         "task_desc": self.task_desc,
                         "package_list": self.package_list,
+                        "data_layout": self.data_layout,
                         "feedback": feedback.get("feedback") if is_patch_mode and isinstance(feedback, dict) else None,
                         "analysis": feedback.get("analysis") if is_patch_mode and isinstance(feedback, dict) else None,
                         "fix_target": target if is_patch_mode else None,
@@ -163,11 +166,11 @@ class PipelineWorkflow(WorkflowBase):
                     self._record_step(iter_id, "Coder", input_data=ctx,
                                       output_data={"task_type": task_type, "target": task_name_item, "code": self.current_code})
                     self.current_code = extract_python(self.current_code)
-                    with open(os.path.join(self.sandbox_dir, "solver.py"), "w") as f:
+                    with open(os.path.join(self.sandbox_dir, "solver.py"), "w", encoding="utf-8") as f:
                         f.write(self.current_code)
 
                 self.current_code = extract_python(self.current_code)
-                with open(os.path.join(self.sandbox_dir, "solver.py"), "w") as f:
+                with open(os.path.join(self.sandbox_dir, "solver.py"), "w", encoding="utf-8") as f:
                     f.write(self.current_code)
 
                 self._record_round_agent("Coder", self.current_code)
@@ -249,18 +252,87 @@ class PipelineWorkflow(WorkflowBase):
         return False
 
     # ---- helpers ----
-    def _load_baseline_metrics(self) -> dict:
-        eval_script = os.path.join(self.sandbox_dir, "eval_script.py")
-        if not os.path.exists(eval_script):
-            self._log("  Warning: eval_script.py not found. Baseline unavailable.")
-            return {}
-        ok, out, err = run_cmd(self.python_path, self.sandbox_dir, "eval_script.py", args=["dataset/baseline.npy"])
-        if ok:
+    def _load_data_shapes(self):
+        """Load input/output shapes from sandbox dataset."""
+        input_shape = None
+        output_shape = None
+        dataset_dir = os.path.join(self.sandbox_dir, "dataset")
+        try:
+            gt_path = os.path.join(dataset_dir, "gt_output.npy")
+            if os.path.exists(gt_path):
+                gt = np.load(gt_path, allow_pickle=True)
+                output_shape = gt.shape
+                self._log(f"  GT output shape: {output_shape}, dtype: {gt.dtype}")
+            # Scan dataset/ for input .npz and .npy files
+            for fname in sorted(os.listdir(dataset_dir)):
+                fpath = os.path.join(dataset_dir, fname)
+                if fname.startswith("raw_data") and fname.endswith(".npz"):
+                    npz = np.load(fpath)
+                    for key in npz.keys():
+                        arr = npz[key]
+                        input_shape = arr.shape
+                        self._log(f"  Input data: {fname}['{key}'], shape: {input_shape}, dtype: {arr.dtype}")
+                        break
+                    break
+                elif fname.endswith(".npy") and fname != "gt_output.npy":
+                    arr = np.load(fpath, allow_pickle=True)
+                    input_shape = arr.shape
+                    self._log(f"  Input data: {fname}, shape: {input_shape}, dtype: {arr.dtype}")
+                    break
+        except Exception as e:
+            self._log(f"  Warning: failed to load data shapes: {e}")
+        return input_shape, output_shape
+
+    def _build_data_layout(self) -> str:
+        """Scan sandbox dataset/ and build a human-readable layout string for agent context."""
+        dataset_dir = os.path.join(self.sandbox_dir, "dataset")
+        parts = []
+
+        # Try data_info.json first (generated by setup_task_sandbox)
+        data_info_path = os.path.join(dataset_dir, "data_info.json")
+        if os.path.exists(data_info_path):
+            with open(data_info_path, "r", encoding="utf-8") as f:
+                data_info = json.load(f)
+            for fname, info in data_info.items():
+                if fname == "gt_output.npy":
+                    continue  # Don't expose GT path to solver
+                if isinstance(info, dict) and "shape" in info:
+                    parts.append(f"dataset/{fname} shape={info['shape']} dtype={info['dtype']}")
+                else:
+                    for key, kinfo in info.items():
+                        parts.append(f"dataset/{fname} key='{key}' shape={kinfo['shape']} dtype={kinfo['dtype']}")
+        else:
+            # Fallback: scan files
+            for fname in sorted(os.listdir(dataset_dir)):
+                fpath = os.path.join(dataset_dir, fname)
+                if fname in ("gt_output.npy", "gt_key.txt", "data_info.json"):
+                    continue
+                if fname.endswith(".npz") and os.path.isfile(fpath):
+                    try:
+                        npz = np.load(fpath)
+                        for k in npz.keys():
+                            arr = npz[k]
+                            parts.append(f"dataset/{fname} key='{k}' shape={arr.shape} dtype={arr.dtype}")
+                    except Exception:
+                        parts.append(f"dataset/{fname}")
+                elif os.path.isfile(fpath):
+                    parts.append(f"dataset/{fname}")
+
+        meta_path = os.path.join(dataset_dir, "meta_data.json")
+        if os.path.exists(meta_path):
             try:
-                return json.loads(out)
-            except json.JSONDecodeError:
-                self._log(f"  Warning: baseline eval output not JSON: {out}")
-        return {}
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                meta_summary = ", ".join(f"{k}={v}" for k, v in meta.items()
+                                         if k != "description")
+                parts.append(f"dataset/meta_data.json ({meta_summary})")
+            except Exception:
+                parts.append("dataset/meta_data.json (physical parameters)")
+        if not parts:
+            parts.append("No data files found in dataset/")
+        layout = "; ".join(parts) + ". Save output to output.npy"
+        self._log(f"  Data layout: {layout}")
+        return layout
 
     def _build_coding_tasks(self, feedback):
         coding_tasks = [("imports", None), *[("function", fn) for fn in self.function_list], ("main_block", None)]
@@ -292,7 +364,7 @@ class PipelineWorkflow(WorkflowBase):
                 if target in self.function_list:
                     coding_tasks = [("function", target)]
                 elif target in ("imports", "main_block", "main"):
-                    coding_tasks = [(target.replace("main", "main_block"), None)]
+                    coding_tasks = [("main_block" if target in ("main_block", "main") else target, None)]
                 else:
                     detected = []
                     if "main" in str(target).lower():
@@ -334,6 +406,29 @@ class PipelineWorkflow(WorkflowBase):
                 self.failure_history[-1]["ticket_assigned_to"] = "Planner"
                 self.failure_history[-1]["feedback"] = "Coder failed 4x. Propose a DIFFERENT and SIMPLER approach."
 
+        # Metrics-based stuck detection: consecutive very low NCC indicates fundamental algorithm failure
+        if len(self.failure_history) >= 2:
+            recent_ncc = []
+            for h in self.failure_history[-2:]:
+                m = h.get("metrics")
+                if isinstance(m, dict) and "ncc" in m:
+                    recent_ncc.append(m["ncc"])
+            if len(recent_ncc) >= 2 and all(ncc < 0.1 for ncc in recent_ncc):
+                self._log("  STUCK (metrics): NCC < 0.1 for 2 consecutive iterations. "
+                          "Fundamental algorithm issue detected. Escalating to Planner with reset guidance.")
+                self.failure_history[-1]["ticket_assigned_to"] = "Planner"
+                self.failure_history[-1]["feedback"] = (
+                    "CRITICAL: NCC has been near zero for multiple iterations, indicating the reconstruction "
+                    "has NO spatial correlation with the ground truth. This is NOT a minor tuning issue. "
+                    "You MUST fundamentally rethink the approach: "
+                    "(1) Use ONLY plain gradient descent: `x -= lr * grad`. Do NOT use Adam, L-BFGS, or any adaptive optimizer. "
+                    "(2) Calibrate learning rate by computing gradient magnitude at x=0. Set lr so that "
+                    "`lr * max(|grad|)` ≈ 0.1 * expected_output_scale. Typical lr for physics problems: 1-100. "
+                    "(3) Start with ZERO regularization, NO gradient normalization, NO LR scheduling. Only positivity constraint. "
+                    "(4) Carefully verify all forward model operator formulas with a numerical sanity check using actual meta_data values. "
+                    "(5) The code MUST be simple: < 150 lines for the solver class, no multi-phase optimization, no L-BFGS fallback."
+                )
+
     def _syntax_check_loop(self, iter_id: int) -> bool:
         max_syn = 5
         for attempt in range(max_syn):
@@ -351,6 +446,7 @@ class PipelineWorkflow(WorkflowBase):
                     "plan": self.current_plan,
                     "task_desc": self.task_desc,
                     "package_list": self.package_list,
+                    "data_layout": self.data_layout,
                     "feedback": f"PERSISTENT syntax errors after {attempt+1} attempts. Start FRESH.\n{err[-500:]}",
                 }
             else:
@@ -358,11 +454,12 @@ class PipelineWorkflow(WorkflowBase):
                     "target_type": "full_rewrite",
                     "skeleton_code": self.current_skeleton,
                     "plan": self.current_plan,
+                    "data_layout": self.data_layout,
                     "feedback": f"SYNTAX ERROR (attempt {attempt+1}):\n{err}",
                 }
             ctx = self._build_context_with_memory(ctx, "Coder", "Coder")
             self.current_code = extract_python(self.coder.implement_and_merge(ctx))
-            with open(os.path.join(self.sandbox_dir, "solver.py"), "w") as f:
+            with open(os.path.join(self.sandbox_dir, "solver.py"), "w", encoding="utf-8") as f:
                 f.write(self.current_code)
             self._record_step(iter_id, "Coder", input_data=ctx,
                               output_data={"task_type": "syntax_fix", "error": err, "code": self.current_code})
@@ -395,11 +492,12 @@ class PipelineWorkflow(WorkflowBase):
                     "plan": self.current_plan,
                     "task_desc": self.task_desc,
                     "package_list": self.package_list,
+                    "data_layout": self.data_layout,
                     "feedback": f"RUNTIME CRASH:\n{stderr[-800:]}\n\nFIX: {hint}",
                 }
                 ctx = self._build_context_with_memory(ctx, "Coder", "Coder")
                 self.current_code = extract_python(self.coder.implement_and_merge(ctx))
-                with open(os.path.join(self.sandbox_dir, "solver.py"), "w") as f:
+                with open(os.path.join(self.sandbox_dir, "solver.py"), "w", encoding="utf-8") as f:
                     f.write(self.current_code)
                 return run_cmd(self.python_path, self.sandbox_dir, "solver.py", timeout=self.execution_timeout)
         return success, stdout, stderr
@@ -426,11 +524,10 @@ class PipelineWorkflow(WorkflowBase):
             self._log(f"  Shape fix error: {e}")
 
     def _check_threshold(self, metrics: dict) -> bool:
-        curr = metrics.get("psnr", 0)
-        base = self.baseline_metrics.get("psnr", 0)
-        threshold = max(base * self.baseline_ratio, self.min_guaranteed_psnr)
-        self._log(f"  Threshold: max({base:.2f}*{self.baseline_ratio}, {self.min_guaranteed_psnr}) = {threshold:.2f}")
-        return curr >= threshold
+        ncc = metrics.get("ncc", 0)
+        nrmse = metrics.get("nrmse", float('inf'))
+        self._log(f"  NCC={ncc:.4f} (min={self.min_ncc}), NRMSE={nrmse:.4f} (max={self.max_nrmse})")
+        return ncc >= self.min_ncc and nrmse <= self.max_nrmse
 
     def _judge(self, logs, metrics, stderr, iter_id) -> dict | None:
         self._log(">>> [Agent] Judge...")
@@ -439,8 +536,11 @@ class PipelineWorkflow(WorkflowBase):
                 "task_desc": self.task_desc,
                 "logs": logs[-1000:],
                 "metrics": metrics,
-                "baseline_metrics": self.baseline_metrics,
                 "current_code_snippet": self.current_code,
+                "data_layout": self.data_layout,
+                "package_list": self.package_list,
+                "plan": getattr(self, 'current_plan', None),
+                "eval_thresholds": f"NCC >= {self.min_ncc}, NRMSE <= {self.max_nrmse}",
             },
             agent_role="Judge",
             current_ticket="Judge",

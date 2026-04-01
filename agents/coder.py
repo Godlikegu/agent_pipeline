@@ -54,11 +54,13 @@ class CoderAgent(BaseAgent):
                 3. Type Safety: Explicitly handle dtype conversions (e.g., `.float()` for float32 consistency)
                 4. NEVER output the entire file - ONLY the modified segment matching the target type.
                 5. **MANDATORY**: You MUST write the actual implementation logic. DO NOT return `pass` or `TODO` comments. You are the IMPLEMENTER. Replace existing `pass` with real code.
-                6. **DATA FILES**: ONLY use `dataset/input.npy` for input data and save to `output.npy`. Do NOT assume ANY other files exist (no .tif, .yaml, .h5, .csv, .mat files). All data comes from input.npy.
+                6. **DATA FILES**: Load input data from `dataset/` directory (e.g., `np.load('dataset/raw_data.npz')` and access keys). Load physical parameters from `dataset/meta_data.json`. Save the final reconstruction to `output.npy`. Do NOT assume any files exist outside `dataset/`.
                 7. **SELF-CONTAINED**: Your code must be fully self-contained. Do NOT import from local project files. Only use installed pip packages and standard library.
                 8. **__init__ IMPLEMENTATION**: When implementing __init__, you MUST set all instance variables. NEVER leave __init__ with just `pass`.
                 9. **API COMPATIBILITY**: When using library functions/classes, do NOT pass keyword arguments you are unsure about. Use only well-documented, standard parameters. If a function call fails with 'unexpected keyword argument', remove that kwarg. Wrap risky API calls in try/except and have a working fallback.
-                10. **CLASS STRUCTURE**: All class definitions must be at the top level of the file (module scope). NEVER nest one class definition inside another class's method. Check indentation carefully."""
+                10. **CLASS STRUCTURE**: All class definitions must be at the top level of the file (module scope). NEVER nest one class definition inside another class's method. Check indentation carefully.
+                11. **ORCHESTRATOR METHODS**: When a class has a setup/initialization method (e.g., `_setup`, `initialize`, `_precompute`) that is called by `__init__` or other methods, it MUST contain actual calls to all necessary helper methods. NEVER leave an orchestrator method as just `pass` or TODO comments while the helper methods it should call are already implemented. Verify the call chain is complete: `__init__` → `_setup()` → `[_helper1(), _helper2(), ...]`.
+                12. **PERFORMANCE**: Do NOT use `torch.utils.checkpoint` (gradient checkpointing) unless the code explicitly runs out of GPU memory. Checkpointing doubles compute time by re-running forward pass during backward. For most inverse problems, standard autograd is fast enough and preferred. Keep the forward loop simple: plain Python for-loop with in-place FFT operations."""
 
     def _build_user_prompt(self, context: Dict[str, Any]) -> str:
         # 统一提取关键上下文
@@ -118,10 +120,15 @@ class CoderAgent(BaseAgent):
         elif target_type == 'imports':
             task_desc = "Replace ONLY the import statements at the top of the file"
         elif target_type == 'main_block':
-            task_desc = "Replace ONLY the code inside `if __name__ == '__main__':` block. Ensure you LOAD `dataset/input.npy` and SAVE result to `output.npy`."
+            data_layout = context.get('data_layout', 'dataset/raw_data.npz (input), dataset/meta_data.json (parameters)')
+            task_desc = f"Replace ONLY the code inside `if __name__ == '__main__':` block. Data layout: {data_layout}. SAVE result to `output.npy`."
 
         else:
-            task_desc = f"Modify the `{target_type}` segment"
+            data_layout = context.get('data_layout', '')
+            if 'full_rewrite' in target_type:
+                task_desc = f"Rewrite the ENTIRE solver file from scratch. Data layout: {data_layout}"
+            else:
+                task_desc = f"Modify the `{target_type}` segment"
 
         # 构建反馈部分（如果有），并合并 failure_history（去重）
         failure_history = context.get('failure_history', '')
@@ -171,14 +178,16 @@ Task: {task_desc}
 
 Output ONLY the exact code segment to replace/insert - nothing else.
 CRITICAL REMINDERS:
-- Use `dataset/input.npy` for input and save final result to `output.npy`.
-- Do NOT load any external files (.tif, .yaml, .h5, .csv, .mat). Only `dataset/input.npy` exists.
+- Data layout: {context.get('data_layout', 'dataset/raw_data.npz for input, dataset/meta_data.json for parameters')}. Save final result to `output.npy`.
+- Only use files listed in the data layout above. Do NOT assume other files exist.
 - __init__ MUST have real implementation with self.xxx = ... (NEVER just pass).
 - All numerical arrays should be np.float64 or np.float32 (avoid object arrays).
-- SAFE DATA LOADING: Always load with `raw = np.load('dataset/input.npy', allow_pickle=True)` then check: `data = raw.item() if raw.ndim == 0 else raw`. NEVER call `.item()` directly without checking ndim first.
 - HYPERPARAMETER FIDELITY: Use EXACTLY the hyperparameter values specified in the Plan. Do NOT add adaptive/warm-start features not in the Plan.
 - SIGN CORRECTNESS: Double-check signs in gradient updates and proximal operators. If plan says `x = z - tau * grad`, code MUST use subtraction, not addition.
 - IMPORT SAFETY: Before using any library API, verify the function/class exists. Use try/except ImportError for optional imports. Do NOT use keyword arguments unless you are certain they exist in the installed version.
+- NUMERICAL PRECISION: For physics-based forward models with iterative propagation (many sequential steps), ALWAYS use float64/complex128 (torch.float64 / torch.complex128). NEVER use float32/complex64 — it causes NaN after ~100 FFT steps. This is NON-NEGOTIABLE.
+- LEARNING RATE: If the Plan specifies a fixed learning rate value (e.g., lr=50), use EXACTLY that value. Do NOT implement learning rate auto-calibration, adaptive scheduling, or gradient-based lr estimation. Use a simple fixed lr with `x -= lr * grad`.
+- SANITY CHECK: If the plan specifies a zero-contrast or trivial-input verification step, you MUST implement it. Print the result so the user can verify correctness before optimization begins.
 """
 
     def implement_and_merge(self, context: Dict[str, Any]) -> str:
@@ -219,12 +228,12 @@ CRITICAL REMINDERS:
             is_invalid = False
             if target_type in ['function', 'class', 'main_block']:
                 if "TODO" in new_code:
-                    print(f"[CoderAgent] ⚠️ Detected 'TODO' in output.")
+                    print(f"[CoderAgent] Detected 'TODO' in output.")
                     is_invalid = True
 
                 # Check for "pass" only body (ignoring docstrings)
                 if re.search(r'^\s*pass\s*$', new_code, re.MULTILINE):
-                     print(f"[CoderAgent] ⚠️ Detected 'pass' statement in output.")
+                     print(f"[CoderAgent] Detected 'pass' statement in output.")
                      is_invalid = True
 
             if is_invalid:
@@ -251,6 +260,8 @@ CRITICAL REMINDERS:
                     result = CodeEditor.replace_imports(full_code, new_code)
                 elif target_type == 'main_block':
                     result = CodeEditor.replace_main_block(full_code, new_code)
+                elif target_type == 'full_rewrite':
+                    result = new_code
                 elif target_type == 'class':
                     result = CodeEditor.replace_class(full_code, target_name, new_code)
                 else:  # function (default)
@@ -265,7 +276,7 @@ CRITICAL REMINDERS:
 
             except ValueError as e:
                 # Syntax/Validation error from CodeEditor
-                print(f"[CoderAgent] ⚠️ Merge/Syntax Error (Attempt {attempt+1}): {e}")
+                print(f"[CoderAgent] Merge/Syntax Error (Attempt {attempt+1}): {e}")
 
                 if attempt < max_retries - 1:
                     # Retry with feedback

@@ -8,3 +8,4 @@ tests/
 skills/library/
 data/
 .claude/
+test_conda_envs/

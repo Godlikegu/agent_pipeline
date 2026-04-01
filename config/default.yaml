@@ -10,7 +10,7 @@ paths:
   paper_markdown_dir: "/data/guyuxuan/agent/paper_md"
 
   # ---- 中间产物 / 工作目录 ----
-  sandbox_root: "/data/guyuxuan/agent/end_sandbox"
+  sandbox_root: "./data/end_sandbox"
   code_cleaner_workdir: "./artifacts/code_cleaner"
 
   # ---- 输出路径 ----
@@ -28,7 +28,7 @@ paths:
 # ========== Pipeline 参数 ==========
 pipeline:
   max_retries: 5                     # 主循环最大重试次数
-  execution_timeout: 600             # solver 执行超时（秒）
+  execution_timeout: 1200             # solver 执行超时（秒）
   syntax_check_timeout: 30           # 语法检查超时（秒）
   max_history_len: 3                 # 保留失败历史条数
   code_size_guard: 12000             # 代码膨胀上限（字符数）
@@ -55,8 +55,9 @@ code_cleaner:
     python_version: "3.10"
     env_prefix: "task_"                # 环境命名前缀: task_<folder_name>
     max_fix_retries: 3                 # LLM 诊断修复最大轮次
-    pip_install_timeout: 300           # pip install 超时（秒）
+    pip_install_timeout: 600           # pip install 超时（秒）
     verify_timeout: 30                 # import 验证超时（秒）
+    torch_cuda_index_url: "https://download.pytorch.org/whl/cu124"  # PyTorch CUDA wheel index
 
 # ========== Skills 系统 ==========
 skills:

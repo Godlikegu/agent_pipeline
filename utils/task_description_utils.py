@@ -53,6 +53,7 @@ def load_or_generate_task_description(
     config: Dict[str, object],
     client: Any,
     model_name: str,
+    meta_data: Dict[str, object] = None,
 ) -> str:
     explicit_path = task_info.get("task_description_path")
     if explicit_path:
@@ -60,7 +61,7 @@ def load_or_generate_task_description(
         if desc_path.exists():
             return read_text_file(desc_path)
 
-    sources = build_task_description_sources(task_info, config)
+    sources = build_task_description_sources(task_info, config, meta_data=meta_data)
     generator = TaskGeneratorAgent.from_config(client=client, model_name=model_name, config=config)
     result = generator.generate_from_sources(
         sources=sources,
@@ -72,6 +73,7 @@ def load_or_generate_task_description(
 def build_task_description_sources(
     task_info: Dict[str, object],
     config: Dict[str, object],
+    meta_data: Dict[str, object] = None,
 ) -> TaskDescriptionSources:
     task_gen_cfg = config.get("task_gen", {})
     default_desc_dir = config.get("paths", {}).get(
@@ -126,6 +128,17 @@ def build_task_description_sources(
             label="readme",
             content=read_text_file(readme_path, DEFAULT_TEXT_CHAR_LIMIT),
             path=readme_path,
+        )
+
+    # Inject meta_data as a config snippet so TaskGeneratorAgent naturally incorporates it
+    if meta_data:
+        import json as _json
+        meta_content = _json.dumps(meta_data, indent=2, default=str)
+        sources.config_snippets.append(
+            SourceText(
+                label="meta_data",
+                content=f"Physical parameters and data format specification:\n{meta_content}",
+            )
         )
 
     config_paths = _coerce_path_list(task_info.get("config_paths"))

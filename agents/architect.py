@@ -21,12 +21,15 @@ class ArchitectAgent(BaseAgent):
                    - Do NOT return a JSON object.
                    - NO conversational text before or after the code.
                 6. Do NOT define a `Config` class. Store all hyperparameters (lr, shape, iterations, etc.) as instance attributes in `InverseSolver.__init__`.
+                7. **Simplicity**: Keep the class structure MINIMAL. Aim for 5-8 methods total (including __init__, forward, solve). Do NOT create separate methods for each tiny sub-operation. The solve method should contain the optimization loop directly — do NOT create separate _solve_lbfgs, _solve_gd, _solve_adam methods. One optimization approach = one solve method.
+                8. **No fallback optimizers**: Do NOT design the skeleton with multiple optimization methods (e.g., L-BFGS with GD fallback). The Planner specifies ONE optimizer — implement exactly that one.
 
                 Rule: Your code structure MUST be strictly modular:
                 Imports: All imports at the top.
                 Solver Class: class InverseSolver:
                 Main: if __name__ == "__main__":
-                      - Must include `np.load('dataset/input.npy')`
+                      - Load input data from `dataset/` (e.g., np.load('dataset/raw_data.npz') and access keys)
+                      - Load physical parameters from `dataset/meta_data.json`
                       - Must include `solver.solve(...)`
                       - Must include `np.save('output.npy', result)`
 
@@ -41,7 +44,10 @@ class ArchitectAgent(BaseAgent):
 
                 if __name__ == "__main__":
                     # Load Data
-                    # input_data = np.load('dataset/input.npy')
+                    # import json
+                    # with open('dataset/meta_data.json') as f: meta = json.load(f)
+                    # raw = np.load('dataset/raw_data.npz')
+                    # input_data = raw[list(raw.keys())[0]]
                     # ...
                     # result = solver.solve(input_data)
                     # np.save('output.npy', result)
@@ -55,6 +61,12 @@ class ArchitectAgent(BaseAgent):
 
                 ### PLAN TO IMPLEMENT
                 {context['plan']}"""
+
+        # Data layout and available packages
+        if context.get('data_layout'):
+            prompt += f"\n\n### DATA LAYOUT (Available Files)\n{context['data_layout']}"
+        if context.get('package_list'):
+            prompt += f"\n\n### AVAILABLE PACKAGES\n{context['package_list']}"
 
         # Explicitly prompt to use injected skills if provided in dedicated field
         if context.get('knowledge_context'):

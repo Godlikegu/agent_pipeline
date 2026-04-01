@@ -54,3 +54,8 @@ models:
     base_url: "https://ai-gateway-internal.dp.tech/v1"
     api_key: "sk-Zj3a7RQDVCXr-Axg-0gtkg"
     temperature: 0.7
+ "Vendor2/Claude-4.6-opus":
+    api_type: "openai"  # or azure / ollama / groq etc.
+    base_url: "https://api.gpugeek.com/v1"
+    api_key: "70o9vh5q1lhrz551000dh6n6yt4pw8i680m7h0sz"
+    temperature: 0.7

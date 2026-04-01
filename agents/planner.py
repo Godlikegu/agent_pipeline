@@ -20,15 +20,34 @@ class PlannerAgent(BaseAgent):
                 - For non-linear/complex priors: Consider Deep Unrolling (Algorithm Unrolling) or End-to-End CNNs (UNet/ResNet).
                 - *Constraint*: Prefer stability and standard implementation over experimental papers.
                 3. **Dimensionality Awareness**: Mentally check the input and output shapes. If Input is (B, C, H, W), ensure the operations preserve or transform dimensions correctly.
-                4. **Self-Contained**: The solution must only use `dataset/input.npy` as input. No external files (.tif, .yaml, .h5, .csv, .mat) are available. All parameters must be derived from the input data or set as reasonable defaults.
+                4. **Self-Contained**: The solution must only use files from `dataset/` directory for input data and `dataset/meta_data.json` for physical parameters. For `.npz` files, load with `np.load()` and access the correct key. No external files (.tif, .yaml, .h5, .csv, .mat) should be assumed. The data layout and available packages will be provided in the context.
                 5. **Simplicity First**: Prefer well-understood classical algorithms that are straightforward to implement in <200 lines of Python. Avoid complex deep learning architectures unless explicitly needed.
+                6. **Hyperparameter Scale Awareness**:
+                   - Check meta_data.json for output scale hints (e.g., ri_contrast_scale, noise_level).
+                   - Physics-based inverse problems often need MUCH larger learning rates (1-100) with plain gradient descent than typical ML tasks. Do NOT default to lr=1e-3 or 1e-4 without justification.
+                   - **Optimizer selection**:
+                     - For **differentiable physics forward models** (wave propagation, beam propagation, etc.) where the forward model is implemented in PyTorch with autograd: Use **plain gradient descent** (`x -= lr * grad`). Do NOT use Adam or other adaptive optimizers — they cause underdetermined inverse problems to converge to trivial solutions.
+                     - For **classical inverse problems with analytic gradients** (e.g., DFT-based imaging, deconvolution, closure quantity fitting): Use **L-BFGS-B** from scipy.optimize.minimize with `jac=True`. L-BFGS-B is the standard optimizer for these problems and converges much faster than gradient descent.
+                   - **Learning rate** (for gradient descent): For physics-based iterative reconstruction with amplitude-domain mean loss, use lr in the range 10–100 as a starting point. Do NOT auto-calibrate lr to be tiny (e.g., 1e-4).
+                   - **Log-image transform for positivity**: When the unknown is a non-negative image (e.g., brightness, intensity), optimize in **log-image space**: let `z = log(I)`, optimize over `z` (unconstrained), and recover `I = exp(z)`. This automatically ensures positivity and improves the optimization landscape. The gradient chain rule is: `grad_z = I * grad_I`. This is standard practice in radio interferometric imaging (ehtim) and many other fields.
+                   - **Regularization policy**: Start with NO regularization (weight=0) and rely only on simple constraints (e.g., positivity). Only add TV or other regularization if the task description explicitly mentions it, and even then start with a very small weight (e.g., 1e-4). Do NOT add upper-bound clamp constraints unless the task description explicitly specifies a value range.
+                   - For amplitude-domain losses (comparing sqrt(intensity)), use mean loss per angle (divide by N_pixels). This keeps gradient magnitudes independent of image resolution and makes lr values transferable.
+                   - Do NOT add gradient normalization, cosine annealing, warm restarts, or other sophisticated scheduling unless explicitly required.
+                7. **Coordinate System & Dimensional Consistency**:
+                   - Before implementing any physics forward model, carefully read the task description for hints about coordinate conventions or unit systems. Use the SAME convention as described in the task — do not invent your own. If the task references a specific implementation (e.g., a GitHub repo or package), follow that implementation's coordinate convention.
+                   - After defining each operator, substitute actual parameter values from meta_data.json and verify the numerical magnitude is physically reasonable (e.g., phase shifts per slice should be O(0.01)–O(1), not O(100)+).
+                   - After implementing the complete forward model, verify it on a trivial input (e.g., zero contrast / identity case) — the output should match expectations (e.g., output intensity ≈ input intensity for zero scattering).
+                   - **The learning rate MUST be calibrated to the operator magnitude**: Always verify by checking actual gradient magnitudes at iteration 0.
+                8. **Numerical Precision for Iterative Physics Models**:
+                   - For forward models that propagate fields through many sequential steps (e.g., >50 slices/layers), ALWAYS use float64/complex128. Float32 accumulates phase/rounding errors and can diverge to NaN/Inf.
+                   - If the forward model involves sequential FFT → multiply → IFFT steps, small per-step errors compound multiplicatively. Budget precision accordingly.
 
                 ### Output Format (Markdown):
                 1. **[Problem Formulation]**: The math equation and variable definitions.
                 2. **[Proposed Strategy]**: Name of the algorithm/architecture.
                 3. **[Step-by-Step Plan]**:
                 - Step 1: Data Preprocessing (Normalization, etc.)
-                - Step 2: Forward Operator Implementation (Physics)
+                - Step 2: Forward Operator Implementation (Physics) — explicitly state the ORDER of operations in each iteration and the complete signal path from source to detector. These must match the task description exactly.
                 - Step 3: Solver/Network Architecture Details
                 - Step 4: Loss Function & Optimizer
                 4. **[Hyperparameters]**: List ALL numerical parameters with EXACT values (e.g., mu=1e-6, tau=0.0001, iterations=500). The Coder MUST use these exact values.
@@ -43,6 +62,12 @@ class PlannerAgent(BaseAgent):
         - 'knowledge_context': (Optional) Injected skills/knowledge string.
         """
         prompt = f"### Task Description\n{context['task_desc']}\n"
+
+        # Data layout and environment info
+        if context.get('data_layout'):
+            prompt += f"\n### DATA LAYOUT (Available Files)\n{context['data_layout']}\n"
+        if context.get('package_list'):
+            prompt += f"\n### AVAILABLE PACKAGES\n{context['package_list']}\n"
 
         # Shape constraints
         if context.get('shape_info'):
@@ -205,5 +230,5 @@ Review against the STRICT checklist above. Output ONLY valid JSON — nothing el
             "reason": f"LLM output parsing failed after {max_retries} attempts",
             "suggestion": "Planner must regenerate plan with explicit mathematical definitions"
         }
-        print(f"[Critic] ⚠️ All retries exhausted. Returning fallback REJECT decision.")
+        print(f"[Critic] All retries exhausted. Returning fallback REJECT decision.")
         return json.dumps(fallback_response, ensure_ascii=False)

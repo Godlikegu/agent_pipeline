@@ -1,8 +1,8 @@
 """
 core/workflow_base.py -- Pipeline workflow base class.
 
-Assumes the sandbox is already set up (by code_cleaner) with:
-  - dataset/input.npy, dataset/gt_output.npy, dataset/baseline.npy
+Assumes the sandbox is already set up with:
+  - dataset/gt_output.npy, dataset/input_data/, dataset/meta_data.json
   - eval_script.py
 The workflow starts from task_description and uses skills for generation.
 """
@@ -21,7 +21,6 @@ from agents.judge import JudgeAgent
 from agents.sandbox_agents import DataGenAgent, EvalGenAgent, get_installed_libraries
 
 from utils.text_utils import extract_json, extract_python, highlight_target_in_code, format_failure_histories
-from code_cleaner.test_harness import load_data_shapes
 
 
 class WorkflowBase:
@@ -38,6 +37,7 @@ class WorkflowBase:
         config: dict = None,
         skill_manager: Any = None,
         max_retries: int = None,
+        eval_thresholds: dict = None,
     ):
         self.task_name = task_name
         self.task_desc = task_desc
@@ -87,8 +87,15 @@ class WorkflowBase:
         self.syntax_check_timeout = pipeline_cfg.get("syntax_check_timeout", 30)
         self.code_size_guard = pipeline_cfg.get("code_size_guard", 12000)
 
-        self.min_guaranteed_psnr = eval_cfg.get("min_guaranteed_psnr", 20.0)
-        self.baseline_ratio = eval_cfg.get("baseline_ratio", 0.8)
+        self.min_ncc = eval_cfg.get("min_ncc", 0.85)
+        self.max_nrmse = eval_cfg.get("max_nrmse", 0.5)
+
+        # Per-task thresholds override global config
+        if eval_thresholds:
+            if "min_ncc" in eval_thresholds:
+                self.min_ncc = eval_thresholds["min_ncc"]
+            if "max_nrmse" in eval_thresholds:
+                self.max_nrmse = eval_thresholds["max_nrmse"]
 
         self.top_k_planner = retrieval_cfg.get("top_k_planner", 3)
         self.top_k_coder = retrieval_cfg.get("top_k_coder", 4)
@@ -233,7 +240,7 @@ class WorkflowBase:
 
     def _save_snapshot(self, iteration: int, stage: str, content: dict):
         path = os.path.join(self.snapshot_dir, f"iter_{iteration:03d}_{stage}.json")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump({"exp_id": self.exp_id, "iteration": iteration, "stage": stage,
                         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"), **content}, f, indent=2)
 
