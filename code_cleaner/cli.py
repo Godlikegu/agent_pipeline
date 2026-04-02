@@ -5,6 +5,7 @@ Usage:
     python -m code_cleaner.cli env-setup --tasks-dir data/tasks --envs-dir ./test_conda_envs
     python -m code_cleaner.cli env-setup --help
 """
+import os
 import sys
 import argparse
 import yaml
@@ -73,9 +74,12 @@ def run_env_setup(args):
         tasks_list = []
         for name, python_path in results.items():
             if python_path:
+                task_dir = os.path.join(tasks_dir, name)
                 tasks_list.append({
                     "name": name,
                     "python_path": python_path,
+                    "task_dir": task_dir,
+                    "task_description_path": os.path.join(task_dir, "README.md"),
                 })
         output = {"tasks": tasks_list}
         output_path = Path(args.output_yaml)

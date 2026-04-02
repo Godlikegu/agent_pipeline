@@ -77,6 +77,23 @@ def _log(msg: str):
     print(f"[EnvSetup] {msg}")
 
 
+# PyTorch packages that need special CUDA index URL
+_TORCH_PACKAGES = {"torch", "torchvision", "torchaudio"}
+
+def _split_torch_packages(requirements: List[str]) -> Tuple[List[str], List[str]]:
+    """Split requirements into (torch_packages, other_packages).
+    Torch packages need a special --index-url for CUDA support."""
+    torch_pkgs = []
+    other_pkgs = []
+    for spec in requirements:
+        name = extract_package_name(spec).lower()
+        if name in _TORCH_PACKAGES:
+            torch_pkgs.append(spec)
+        else:
+            other_pkgs.append(spec)
+    return torch_pkgs, other_pkgs
+
+
 # ---------------------------------------------------------------------------
 # CondaEnvManager — pure subprocess wrapper, no LLM dependency
 # ---------------------------------------------------------------------------
@@ -208,6 +225,16 @@ class CondaEnvManager:
             return True, "", ""
         _log(f"Installing: {', '.join(packages)}")
         cmd = [python_path, "-m", "pip", "install"] + packages
+        return self._run_cmd(cmd, timeout=timeout)
+
+    def pip_install_torch_cuda(self, python_path: str, torch_packages: List[str],
+                               cuda_index_url: str = "https://download.pytorch.org/whl/cu124",
+                               timeout: int = 600) -> Tuple[bool, str, str]:
+        """Install PyTorch packages with CUDA support using --index-url."""
+        if not torch_packages:
+            return True, "", ""
+        _log(f"Installing PyTorch with CUDA: {', '.join(torch_packages)} (index: {cuda_index_url})")
+        cmd = [python_path, "-m", "pip", "install"] + torch_packages + ["--index-url", cuda_index_url]
         return self._run_cmd(cmd, timeout=timeout)
 
     def pip_install_single(self, python_path: str, package: str,
@@ -465,19 +492,53 @@ Rules:
                 self.conda_manager.remove_env(env_name)
             python_path = self.conda_manager.create_env(env_name)
 
-        # Install requirements
-        ok, stdout, stderr = self.conda_manager.pip_install_from_file(
-            python_path, req_path, timeout=self.pip_timeout
-        )
-        if not ok:
-            _log(f"[{task_name}] Batch install failed. Trying individual packages...")
-            # Install one-by-one to isolate failures
-            for spec in requirements:
-                ok_s, _, err_s = self.conda_manager.pip_install_single(
-                    python_path, spec, timeout=self.pip_timeout
-                )
-                if not ok_s:
-                    _log(f"[{task_name}] Failed: {spec} -> {err_s[:200]}")
+        # Install requirements — handle torch packages with CUDA index separately
+        torch_pkgs, other_pkgs = _split_torch_packages(requirements)
+        torch_cuda_index = env_cfg.get("torch_cuda_index_url", "https://download.pytorch.org/whl/cu124")
+
+        if torch_pkgs:
+            _log(f"[{task_name}] Installing PyTorch with CUDA support...")
+            ok_t, _, stderr_t = self.conda_manager.pip_install_torch_cuda(
+                python_path, torch_pkgs, cuda_index_url=torch_cuda_index, timeout=self.pip_timeout
+            )
+            if not ok_t:
+                _log(f"[{task_name}] PyTorch CUDA install failed: {stderr_t[:300]}")
+                # Fallback: try without CUDA index
+                _log(f"[{task_name}] Falling back to default PyTorch install...")
+                for spec in torch_pkgs:
+                    self.conda_manager.pip_install_single(python_path, spec, timeout=self.pip_timeout)
+
+        if other_pkgs:
+            # Write a temporary requirements file without torch packages
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as tmp:
+                tmp.write("\n".join(other_pkgs) + "\n")
+                tmp_path = tmp.name
+            ok, stdout, stderr = self.conda_manager.pip_install_from_file(
+                python_path, tmp_path, timeout=self.pip_timeout
+            )
+            os.unlink(tmp_path)
+            if not ok:
+                _log(f"[{task_name}] Batch install failed. Trying individual packages...")
+                for spec in other_pkgs:
+                    ok_s, _, err_s = self.conda_manager.pip_install_single(
+                        python_path, spec, timeout=self.pip_timeout
+                    )
+                    if not ok_s:
+                        _log(f"[{task_name}] Failed: {spec} -> {err_s[:200]}")
+        elif not torch_pkgs:
+            # No packages at all (shouldn't happen, but just in case)
+            ok, stdout, stderr = self.conda_manager.pip_install_from_file(
+                python_path, req_path, timeout=self.pip_timeout
+            )
+            if not ok:
+                _log(f"[{task_name}] Batch install failed. Trying individual packages...")
+                for spec in requirements:
+                    ok_s, _, err_s = self.conda_manager.pip_install_single(
+                        python_path, spec, timeout=self.pip_timeout
+                    )
+                    if not ok_s:
+                        _log(f"[{task_name}] Failed: {spec} -> {err_s[:200]}")
 
         # Load reference info (e.g. GitHub URLs) from task directory
         reference_info = ""

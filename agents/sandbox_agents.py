@@ -64,8 +64,8 @@ Requirements:
      gt_c = gt_arr - gt_arr.mean()
      ncc = np.sum(pred_c * gt_c) / (np.linalg.norm(pred_c) * np.linalg.norm(gt_c) + 1e-10)
 
-   NRMSE computation (normalized by L2 norm of ground truth):
-     nrmse = np.linalg.norm(pred_arr - gt_arr) / (np.linalg.norm(gt_arr) + 1e-10)
+   NRMSE computation (normalized by value range of reference):
+     nrmse = float(np.sqrt(np.mean((pred_arr - gt_arr)**2)) / (gt_arr.max() - gt_arr.min() + 1e-30))
 
 4. Handle minor shape mismatches (squeeze singleton dimensions).
 5. Print result strictly as JSON to stdout: {"ncc": <float>, "nrmse": <float>}
