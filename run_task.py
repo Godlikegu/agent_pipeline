@@ -281,6 +281,7 @@ def run_single_task(
             config=config,
             skill_manager=skill_manager,
             eval_thresholds=eval_thresholds,
+            task_dir=task_dir,
         )
 
         success = workflow.run()
