@@ -38,11 +38,13 @@ class WorkflowBase:
         skill_manager: Any = None,
         max_retries: int = None,
         eval_thresholds: dict = None,
+        task_dir: str = None,
     ):
         self.task_name = task_name
         self.task_desc = task_desc
         self.sandbox_dir = sandbox_dir
         self.python_path = python_path
+        self.task_dir = task_dir
 
         self.config = config or {}
         pipeline_cfg = self.config.get("pipeline", {})
@@ -124,7 +126,14 @@ class WorkflowBase:
     def _log(self, message: str):
         ts = time.strftime("[%H:%M:%S]")
         formatted = f"{ts} {message}"
-        print(formatted)
+        # Safe print that handles non-ASCII on Windows GBK console
+        try:
+            print(formatted)
+        except UnicodeEncodeError:
+            import sys
+            enc = getattr(sys.stdout, "encoding", "utf-8") or "utf-8"
+            sys.stdout.write(formatted.encode(enc, errors="replace").decode(enc, errors="replace") + "\n")
+            sys.stdout.flush()
         with open(self.log_file, "a", encoding="utf-8") as f:
             f.write(formatted + "\n")
 
@@ -282,7 +291,7 @@ class WorkflowBase:
                     docstring = ast.get_docstring(node)
                     if docstring and node.body:
                         first = node.body[0]
-                        if isinstance(first, ast.Expr) and isinstance(first.value, (ast.Str, ast.Constant)):
+                        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
                             end = first.end_lineno if hasattr(first, "end_lineno") else first.lineno
                     elif node.body:
                         end = max(start, node.body[0].lineno - 2)
@@ -328,6 +337,22 @@ class WorkflowBase:
 
         if agent_role not in ["Judge", "Critic"]:
             relevant = [h for h in self.failure_history if h.get("ticket_assigned_to") == current_ticket]
+
+            # For Coder and Architect: also inject runtime error history from OTHER tickets.
+            # This ensures that after a Planner reset (full code regeneration), the Coder
+            # still sees previous runtime errors and avoids repeating the same mistakes.
+            if agent_role in ("Coder", "Architect"):
+                _ERROR_KEYWORDS = ("error", "traceback", "exception", "crash",
+                                   "runtime", "unsupported", "not implemented")
+                runtime_error_history = [
+                    h for h in self.failure_history
+                    if h not in relevant
+                    and (h.get("evidence") or h.get("analysis", ""))
+                    and any(kw in (h.get("evidence", "") + " " + h.get("analysis", "")).lower()
+                            for kw in _ERROR_KEYWORDS)
+                ]
+                relevant.extend(runtime_error_history)
+
             if relevant:
                 context["failure_history"] = format_failure_histories(relevant)
 
@@ -337,9 +362,15 @@ class WorkflowBase:
                 query_text = retrieval_query or self.task_desc.split("### GENERAL KNOWLEDGE")[0].strip()
                 top_k = self.top_k_coder if agent_role == "Coder" else self.top_k_planner
 
-                # Get already-injected IDs for this round (dedup for Coder multi-call)
+                # For Coder: do NOT exclude skills already injected in this round.
+                # The Coder needs the FULL skill set for each function implementation,
+                # because each Coder call is independent and may need different skills.
+                # Only exclude for Planner (which is called once per round).
                 round_id = self._current_round.get("round_id", 0)
-                already_injected = self._round_skills_injected.get(round_id, set())
+                if agent_role == "Planner":
+                    already_injected = self._round_skills_injected.get(round_id, set())
+                else:
+                    already_injected = set()  # Coder gets all skills every time
 
                 knowledge = self.skill_manager.retrieve_knowledge(
                     task_desc=query_text,

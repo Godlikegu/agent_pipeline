@@ -54,7 +54,9 @@ class FileSkillManager:
         self.similarity_threshold = retrieval_cfg.get("similarity_threshold", 0.6)
         self.max_token_budget = retrieval_cfg.get("max_token_budget", 2000)
         self.top_k_planner = retrieval_cfg.get("top_k_planner", 3)
-        self.top_k_coder = retrieval_cfg.get("top_k_coder", 4)
+        self.top_k_coder = retrieval_cfg.get("top_k_coder", 3)
+        self.max_permanent = retrieval_cfg.get("max_permanent", 3)
+        self.max_draft = retrieval_cfg.get("max_draft", 5)
 
         # Learning params
         self.merge_similarity_threshold = learning_cfg.get("merge_similarity_threshold", 0.75)
@@ -135,14 +137,19 @@ class FileSkillManager:
         perm_ranked = self._rank_by_similarity(query, permanent)
         draft_ranked = self._rank_by_similarity(query, drafts)
 
-        # Merge: permanent first, then draft
+        # Enforce separate tier limits
+        perm_ranked = perm_ranked[:self.max_permanent]
+        draft_ranked = draft_ranked[:self.max_draft]
+
+        # Merge: permanent first (more reliable), then draft
         all_ranked = perm_ranked + draft_ranked
 
-        # Category limits
+        # Category limits (use config-driven top_k so all relevant skills can be injected)
         code_limit = 2 if agent_role == "Coder" else 0
+        general_limit = max(top_k, self.max_items)
         limits = {
-            "knowledge_general": 2,
-            "knowledge_task_specific": max(1, min(top_k, self.max_items)),
+            "knowledge_general": general_limit,
+            "knowledge_task_specific": max(3, min(top_k, self.max_items)),
             "code": code_limit,
         }
         results: Dict[str, List[Dict]] = {k: [] for k in limits}
@@ -155,7 +162,7 @@ class FileSkillManager:
             if limits.get(cat, 0) <= 0:
                 continue
             payload = self.store.export_prompt_payload(r)
-            est = max(60, len(payload.get("instructions", "")) // 4)
+            est = max(60, len(payload.get("instructions", "")) // 3)  # More conservative token estimation
             if budget - est < 0:
                 continue
             budget -= est
@@ -168,7 +175,11 @@ class FileSkillManager:
         """Format retrieved skills for prompt injection. Labels [PERMANENT] or [DRAFT]."""
         if not any(knowledge.values()):
             return ""
-        sections: list[str] = []
+        sections: list[str] = [
+            "**Note**: [PERMANENT] skills have been validated across multiple task runs and are highly reliable. "
+            "[DRAFT] skills are newly extracted and may need validation. "
+            "Prefer following [PERMANENT] skills when they conflict with [DRAFT] ones."
+        ]
 
         cat_labels = [
             ("knowledge_general", "General Knowledge Skills"),
@@ -203,6 +214,7 @@ class FileSkillManager:
         task_desc: str,
         trajectories: List[dict],
         final_outcome: str,
+        code_diff_report: str = "",
     ) -> List[SkillRecord]:
         """Post-task: use SkillsGeneratorAgent to analyze trajectories and create draft skills."""
         if not self.learning_enabled:
@@ -226,6 +238,7 @@ class FileSkillManager:
                 "task_desc": task_desc,
                 "trajectories_json": traj_json,
                 "final_outcome": final_outcome,
+                "code_diff_report": code_diff_report,
             })
         except Exception as e:
             logger.error("SkillsGenerator LLM call failed: %s", e)
@@ -264,11 +277,8 @@ class FileSkillManager:
         instructions = candidate.get("instructions", "")
         cand_text = f"{title} {instructions}"
 
-        # Find similar existing active skills (same category)
-        existing = [
-            r for r in self.store.list_records(status="active")
-            if r.category == cat
-        ]
+        # Find similar existing active skills (any category — cross-category dedup)
+        existing = self.store.list_records(status="active")
 
         best_sim, best_match = 0.0, None
         for r in existing:
@@ -357,11 +367,10 @@ class FileSkillManager:
             best_sim, best_perm = 0.0, None
             r_text = f"{r.title} {r.instructions}"
             for p in perm:
-                if p.category == r.category:
-                    sim = self._compute_similarity(r_text, f"{p.title} {p.instructions}")
-                    if sim > best_sim:
-                        best_sim = sim
-                        best_perm = p
+                sim = self._compute_similarity(r_text, f"{p.title} {p.instructions}")
+                if sim > best_sim:
+                    best_sim = sim
+                    best_perm = p
 
             if best_sim >= self.merge_similarity_threshold and best_perm:
                 # Merge into the permanent skill

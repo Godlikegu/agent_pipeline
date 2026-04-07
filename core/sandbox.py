@@ -26,6 +26,6 @@ def run_cmd(
         cmd = [python_path, script_name] + (args or [])
     try:
         result = subprocess.run(cmd, cwd=sandbox_dir, capture_output=True, text=True, timeout=timeout)
-        return result.returncode == 0, result.stdout, result.stderr
+        return result.returncode == 0, result.stdout or "", result.stderr or ""
     except subprocess.TimeoutExpired:
         return False, "", "TIMEOUT EXPIRED"

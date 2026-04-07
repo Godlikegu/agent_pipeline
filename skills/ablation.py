@@ -29,6 +29,7 @@ class NoSkillManager:
     def distill_from_trajectories(
         self, task_name: str = "", task_desc: str = "",
         trajectories: List[dict] = None, final_outcome: str = "",
+        code_diff_report: str = "",
     ) -> list:
         return []
 

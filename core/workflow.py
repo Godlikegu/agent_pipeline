@@ -27,9 +27,10 @@ from utils.text_utils import extract_json, extract_python
 class PipelineWorkflow(WorkflowBase):
     def __init__(self, task_name: str, task_desc: str, sandbox_dir: str, python_path: str,
                  client: Any, model_name: str, config: dict = None, skill_manager: Any = None,
-                 max_retries: int = None, eval_thresholds: dict = None):
+                 max_retries: int = None, eval_thresholds: dict = None, task_dir: str = None):
         super().__init__(task_name, task_desc, sandbox_dir, python_path, client, model_name,
-                         config, skill_manager, max_retries, eval_thresholds=eval_thresholds)
+                         config, skill_manager, max_retries, eval_thresholds=eval_thresholds,
+                         task_dir=task_dir)
 
     def run(self) -> bool:
         self.input_shape, self.output_shape = self._load_data_shapes()
@@ -340,38 +341,61 @@ class PipelineWorkflow(WorkflowBase):
         target = None
 
         if isinstance(feedback, dict) and feedback.get("ticket_assigned_to") == "Coder":
-            target = feedback.get("fix_target")
-            if target:
-                match = re.search(r"\b([_a-zA-Z0-9]+)\b", target)
-                if match:
-                    candidate = match.group(1)
-                    if candidate in self.function_list or candidate in ["imports", "main_block"]:
-                        target = candidate
-                    elif "." in target:
-                        parts = target.split(".")
-                        if parts[-1] in self.function_list:
-                            target = parts[-1]
+            raw_target = feedback.get("fix_target", "")
 
-            if not target:
+            # Parse comma-separated targets from Judge
+            resolved_targets = []
+            if raw_target:
+                candidates = [t.strip() for t in raw_target.split(",") if t.strip()]
+                for candidate in candidates:
+                    # Extract identifier from each candidate
+                    match = re.search(r"\b([_a-zA-Z0-9]+)\b", candidate)
+                    if match:
+                        name = match.group(1)
+                        if name in self.function_list or name in ["imports", "main_block", "main"]:
+                            resolved_targets.append(name)
+                        elif "." in candidate:
+                            parts = candidate.split(".")
+                            if parts[-1] in self.function_list:
+                                resolved_targets.append(parts[-1])
+
+            # Fallback: search analysis text for function names
+            if not resolved_targets:
+                analysis_text = feedback.get("analysis", "") + " " + feedback.get("evidence", "")
                 for func in self.function_list:
-                    if func in feedback.get("analysis", ""):
-                        target = func
-                        break
+                    if func in analysis_text:
+                        resolved_targets.append(func)
 
-            if target:
+            # Deduplicate while preserving order
+            seen = set()
+            unique_targets = []
+            for t in resolved_targets:
+                if t not in seen:
+                    seen.add(t)
+                    unique_targets.append(t)
+            resolved_targets = unique_targets
+
+            if resolved_targets:
+                target = ",".join(resolved_targets)
                 self._log(f"  Patch mode: {target}")
                 is_patch_mode = True
-                if target in self.function_list:
-                    coding_tasks = [("function", target)]
-                elif target in ("imports", "main_block", "main"):
-                    coding_tasks = [("main_block" if target in ("main_block", "main") else target, None)]
+                patch_tasks = []
+                for t in resolved_targets:
+                    if t in self.function_list:
+                        patch_tasks.append(("function", t))
+                    elif t in ("imports", "main_block", "main"):
+                        patch_tasks.append(("main_block" if t in ("main_block", "main") else t, None))
+                if patch_tasks:
+                    coding_tasks = patch_tasks
                 else:
+                    # Fallback: try substring matching
                     detected = []
-                    if "main" in str(target).lower():
-                        detected.append(("main_block", None))
-                    for fn in self.function_list:
-                        if fn in str(target):
-                            detected.append(("function", fn))
+                    for t in resolved_targets:
+                        if "main" in t.lower():
+                            detected.append(("main_block", None))
+                        for fn in self.function_list:
+                            if fn in t:
+                                detected.append(("function", fn))
                     if detected:
                         coding_tasks = detected
                     else:
@@ -418,15 +442,13 @@ class PipelineWorkflow(WorkflowBase):
                           "Fundamental algorithm issue detected. Escalating to Planner with reset guidance.")
                 self.failure_history[-1]["ticket_assigned_to"] = "Planner"
                 self.failure_history[-1]["feedback"] = (
-                    "CRITICAL: NCC has been near zero for multiple iterations, indicating the reconstruction "
-                    "has NO spatial correlation with the ground truth. This is NOT a minor tuning issue. "
-                    "You MUST fundamentally rethink the approach: "
-                    "(1) Use ONLY plain gradient descent: `x -= lr * grad`. Do NOT use Adam, L-BFGS, or any adaptive optimizer. "
-                    "(2) Calibrate learning rate by computing gradient magnitude at x=0. Set lr so that "
-                    "`lr * max(|grad|)` ≈ 0.1 * expected_output_scale. Typical lr for physics problems: 1-100. "
-                    "(3) Start with ZERO regularization, NO gradient normalization, NO LR scheduling. Only positivity constraint. "
-                    "(4) Carefully verify all forward model operator formulas with a numerical sanity check using actual meta_data values. "
-                    "(5) The code MUST be simple: < 150 lines for the solver class, no multi-phase optimization, no L-BFGS fallback."
+                    "CRITICAL: Reconstruction has no correlation with ground truth for multiple iterations. "
+                    "This is a FUNDAMENTAL algorithm/implementation issue. You MUST: "
+                    "(1) Verify ALL forward model operator formulas have correct signs — check EACH operator. "
+                    "(2) Verify loss normalization matches the original plan exactly. "
+                    "(3) Verify masks are smooth (sigmoid/exponential) where specified, not hard binary cutoffs. "
+                    "(4) Simplify: remove any features not in the original plan (no adaptive lr, no extra scheduling). "
+                    "(5) Propose a SIMPLER implementation with fewer moving parts."
                 )
 
     def _syntax_check_loop(self, iter_id: int) -> bool:
@@ -546,29 +568,102 @@ class PipelineWorkflow(WorkflowBase):
             current_ticket="Judge",
             retrieval_query=f"{self.task_desc}\n\nERROR:\n{stderr[-500:]}\nMETRICS: {metrics}",
         )
-        judgment = self.judge.generate(judge_ctx)
-        self._save_artifact(f"iter_{iter_id}_judge.json", judgment)
-        try:
-            result = json.loads(extract_json(judgment))
-            if "evidence" not in result:
-                result["evidence"] = "MISSING"
-                result["ticket_assigned_to"] = "Coder"
-            self._log(f"  Judge -> {result['ticket_assigned_to']}: {result.get('analysis', 'N/A')[:100]}")
-            self._record_step(iter_id, "Judge", input_data=judge_ctx, output_data=result)
-            self.failure_history.append({
-                "iteration": self.retry_count + 1,
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "ticket_assigned_to": result["ticket_assigned_to"],
-                "fix_target": result.get("fix_target"),
-                "analysis": result.get("analysis", ""),
-                "evidence": result.get("evidence", ""),
-                "feedback": result.get("feedback", ""),
-                "metrics": metrics,
-            })
-            return result
-        except Exception as e:
-            self._log(f"  Judge parse error: {e}")
+
+        result = None
+        for attempt in range(2):
+            if attempt > 0:
+                self._log("  Judge retry (previous output was not valid JSON)...")
+                judge_ctx["feedback"] = (
+                    "Your previous output was NOT valid JSON and could not be parsed. "
+                    "You MUST output ONLY a single valid JSON object. "
+                    "Do NOT include unescaped newlines or special characters inside string values. "
+                    "Keep all string values concise and on a single line."
+                )
+            judgment = self.judge.generate(judge_ctx)
+            self._save_artifact(f"iter_{iter_id}_judge.json", judgment)
+            try:
+                extracted = extract_json(judgment)
+                result = json.loads(extracted)
+                break
+            except Exception as e:
+                # Try to repair common JSON issues before giving up
+                try:
+                    repaired = self._repair_json(extracted if 'extracted' in dir() else judgment)
+                    result = json.loads(repaired)
+                    self._log(f"  Judge JSON repaired successfully.")
+                    break
+                except Exception:
+                    pass
+                self._log(f"  Judge parse error (attempt {attempt+1}): {e}")
+
+        if result is None:
             return None
+
+        if "evidence" not in result:
+            result["evidence"] = "MISSING"
+            result["ticket_assigned_to"] = "Coder"
+        self._log(f"  Judge -> {result['ticket_assigned_to']}: {result.get('analysis', 'N/A')[:100]}")
+        self._record_step(iter_id, "Judge", input_data=judge_ctx, output_data=result)
+        self.failure_history.append({
+            "iteration": self.retry_count + 1,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "ticket_assigned_to": result["ticket_assigned_to"],
+            "fix_target": result.get("fix_target"),
+            "analysis": result.get("analysis", ""),
+            "evidence": result.get("evidence", ""),
+            "feedback": result.get("feedback", ""),
+            "metrics": metrics,
+        })
+        return result
+
+    @staticmethod
+    def _repair_json(text: str) -> str:
+        """Attempt to repair common JSON issues from LLM output."""
+        # Remove control characters that break JSON (except \n \r \t)
+        cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', ' ', text)
+
+        # Fix unescaped newlines inside JSON string values
+        # Strategy: find string boundaries and escape internal newlines
+        in_string = False
+        escape_next = False
+        chars = list(cleaned)
+        for i, ch in enumerate(chars):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == '\\':
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string and ch == '\n':
+                chars[i] = '\\n'
+            elif in_string and ch == '\r':
+                chars[i] = '\\r'
+            elif in_string and ch == '\t':
+                chars[i] = '\\t'
+        repaired = ''.join(chars)
+
+        # Try parsing; if it fails, try truncating at the last complete key-value
+        try:
+            json.loads(repaired)
+            return repaired
+        except json.JSONDecodeError:
+            pass
+
+        # Try to close truncated JSON by finding last valid closing point
+        # Find last complete "key": "value" and close the object
+        last_brace = repaired.rfind('}')
+        if last_brace > 0:
+            candidate = repaired[:last_brace + 1]
+            try:
+                json.loads(candidate)
+                return candidate
+            except json.JSONDecodeError:
+                pass
+
+        return repaired
 
     # ---- Trajectory Writing ----
     def _write_trajectories(self, final_outcome: str):
@@ -604,12 +699,53 @@ class PipelineWorkflow(WorkflowBase):
             return
 
         try:
-            # 1. Distill new skills from trajectories
+            # 0. Generate code diff analysis report (if reference code exists)
+            code_diff_report = ""
+            solver_code = ""
+            solver_path = os.path.join(self.sandbox_dir, "solver.py")
+            if os.path.isfile(solver_path):
+                try:
+                    with open(solver_path, "r", encoding="utf-8") as f:
+                        solver_code = f.read()
+                except Exception as e:
+                    self._log(f"  [Skills] Failed to read solver.py: {e}")
+
+            if self.task_dir and solver_code:
+                from agents.code_diff_analyzer import CodeDiffAnalyzerAgent, load_reference_code
+                reference_code = load_reference_code(self.task_dir)
+                if reference_code:
+                    self._log("  [Skills] Generating code diff analysis report...")
+                    # Collect last execution error and metrics for context
+                    last_error = ""
+                    last_metrics = None
+                    if self.failure_history:
+                        last = self.failure_history[-1]
+                        last_error = last.get("evidence", "")
+                        last_metrics = last.get("metrics")
+                    diff_analyzer = CodeDiffAnalyzerAgent(self.client, self.model_name)
+                    try:
+                        diff_raw = diff_analyzer.generate({
+                            "solver_code": solver_code,
+                            "reference_code": reference_code,
+                            "task_desc": self.task_desc,
+                            "execution_error": last_error,
+                            "metrics": last_metrics,
+                        })
+                        code_diff_report = diff_raw
+                        self._log(f"  [Skills] Code diff report generated ({len(code_diff_report)} chars)")
+                        self._save_artifact("code_diff_report.json", code_diff_report)
+                    except Exception as e:
+                        self._log(f"  [Skills] Code diff analysis failed: {e}")
+                else:
+                    self._log("  [Skills] No reference code found in task_dir, skipping diff analysis.")
+
+            # 1. Distill new skills from trajectories + code diff report
             new_skills = self.skill_manager.distill_from_trajectories(
                 task_name=self.task_name,
                 task_desc=self.task_desc,
                 trajectories=self.round_trajectories,
                 final_outcome=final_outcome,
+                code_diff_report=code_diff_report,
             )
 
             new_skill_ids = {s.id for s in new_skills}
