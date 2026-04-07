@@ -28,7 +28,7 @@ paths:
 # ========== Pipeline 参数 ==========
 pipeline:
   max_retries: 5                     # 主循环最大重试次数
-  execution_timeout: 1200             # solver 执行超时（秒）
+  execution_timeout: 1800             # solver 执行超时（秒）
   syntax_check_timeout: 30           # 语法检查超时（秒）
   max_history_len: 3                 # 保留失败历史条数
   code_size_guard: 12000             # 代码膨胀上限（字符数）
@@ -61,17 +61,19 @@ code_cleaner:
 
 # ========== Skills 系统 ==========
 skills:
-  retrieval_enabled: false            # 只读开关：允许检索已有 skills（default=true）
-  learning_enabled: false            # 可写开关：允许从轨迹学习（default=false，implies retrieval_enabled=true）
+  retrieval_enabled: false              # 只读开关：允许检索已有 skills（default=true）
+  learning_enabled: false              # 可写开关：允许从轨迹学习（default=false，implies retrieval_enabled=true）
   retrieval:
-    max_token_budget: 2000           # 检索 token 预算上限
-    similarity_threshold: 0.60       # 注入的相似度门槛（embedding cosine sim）
-    max_items: 5                     # 最多注入条数
-    top_k_planner: 3                 # Planner agent 检索条数
-    top_k_coder: 4                   # Coder agent 检索条数
+    max_token_budget: 10000          # 检索 token 预算上限（增大以确保所有相关 skills 能被注入）
+    similarity_threshold: 0.05       # 注入的相似度门槛（embedding cosine sim，降低以确保检索覆盖；TF-IDF fallback scores are 0.05-0.15）
+    max_items: 12                    # 最多注入条数（提高以容纳更多specific skills）
+    top_k_planner: 10                # Planner agent 检索条数
+    top_k_coder: 10                  # Coder agent 检索条数
+    max_permanent: 5                 # 永久化 skills 最多检索条数
+    max_draft: 12                    # draft skills 最多检索条数
   learning:
-    merge_similarity_threshold: 0.75 # 相似 skills 合并阈值
-    max_skills_per_distillation: 10  # 单次蒸馏最大 skills 数
+    merge_similarity_threshold: 0.55 # 相似 skills 合并阈值（降低以捕获更多语义重复）
+    max_skills_per_distillation: 6   # 单次蒸馏最大 skills 数（提高以捕获更多specific knowledge）
   generator:
     temperature: 0.3                 # skills_generator agent 温度
     max_tokens: 16000                # skills_generator agent max_tokens
