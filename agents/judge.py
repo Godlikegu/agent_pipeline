@@ -33,8 +33,11 @@ CRITICAL TEST: Compare code against Planner's mathematical plan.
   • Plan specifies mu=1e-6 but code uses mu=1e-4 → HYPERPARAMETER DEVIATION (Coder)
   • Code adds adaptive/warm-start features NOT in the plan → UNAUTHORIZED MODIFICATION (Coder)
   • Plan says "plain gradient descent" but code uses `torch.optim.Adam` or `torch.optim.LBFGS` → UNAUTHORIZED OPTIMIZER CHANGE (Coder)
-  • Code adds gradient normalization (per-slice normalization, gradient clipping, etc.) not specified in plan → UNAUTHORIZED MODIFICATION (Coder)
+  • Code adds gradient normalization, gradient clipping, etc. not specified in plan → UNAUTHORIZED MODIFICATION (Coder)
   • Code adds cosine annealing, warm restarts, or LR scheduling not specified in plan → UNAUTHORIZED MODIFICATION (Coder)
+  • Code uses hard binary masks (torch.where with zeros_like) when plan specifies smooth (sigmoid/exponential) → IMPLEMENTATION DEVIATION (Coder)
+  • Code is missing loss normalization (e.g., /n_pixels) that plan specifies → IMPLEMENTATION DEVIATION (Coder)
+- **Plan Compliance**: If the Plan includes a [Critical Implementation Checklist], verify EACH item. Report every deviation.
 - VERDICT → "Coder"
 - WHY: Algorithm design is correct, but implementation deviates from spec.
 - FEEDBACK MUST INCLUDE: The exact parameter values from the Plan that the code should use.
@@ -48,13 +51,13 @@ ROOT CAUSES:
   - Wrong algorithm choice (e.g., Wiener filter for non-linear problem)
   - Missing regularization term in loss function
   - Incorrect convergence criteria (e.g., fixed 10 iterations for ill-conditioned problem)
-  - Learning rate too small (physics inverse problems often need lr=1-100 with plain GD, not lr=1e-3)
-  - Using Adam optimizer instead of plain gradient descent — Adam's adaptive rates cause underdetermined problems to converge to trivial/uniform solutions
+  - Learning rate is poorly calibrated for the problem scale (check Plan for expected lr range)
+  - Optimizer choice deviates from what the Plan specifies
   - Unnecessary or excessive regularization suppressing the signal (if task description does not mention regularization, weight should be 0)
   - Unnecessary upper-bound clamp constraints not specified in the task description
-  - Check meta_data.json for expected output scale (e.g., ri_contrast_scale) — if max(output) is orders of magnitude different from expected scale, the optimizer is not converging
-  - **Coordinate system mismatch**: Forward model operators using physical coordinates (k0=2π/λ) vs normalised coordinates (res=pixel_size*n0/λ) — this causes order-of-magnitude errors in scattering/propagation
-  - **NCC ≈ 0 diagnostic** (NCC < 0.1): This means the reconstruction has ZERO spatial correlation with the ground truth — it is not a minor tuning issue. The most likely causes are: (1) forward model operator formulas are fundamentally wrong (coordinate system error), (2) optimizer is wrong (Adam instead of plain GD), (3) learning rate is orders of magnitude too small. Recommend the Planner to RESET to the simplest possible configuration: plain gradient descent, lr in range 1-100, NO regularization, only positivity constraint, and carefully verify all operator formulas with numerical sanity checks.
+  - Check meta_data.json for expected output scale — if max(output) is orders of magnitude different from expected scale, the optimizer is not converging
+  - **Coordinate system or unit convention mismatch** between the Plan and implementation
+  - **NCC ≈ 0 diagnostic** (NCC < 0.1): This means the reconstruction has ZERO spatial correlation with the ground truth — it is NOT a minor tuning issue. Most likely causes: (1) forward model formula signs are wrong, (2) loss normalization missing or wrong, (3) masks are binary when they should be smooth, (4) optimizer/lr deviates from plan. Recommend Planner to fundamentally rethink the approach.
 - VERDICT -> "Planner"
 - WHY: The math itself is flawed. Correct implementation of wrong math still fails.
 
@@ -64,7 +67,7 @@ ROOT CAUSES:
   "ticket_assigned_to": "Planner" | "Architect" | "Coder",
   "analysis": "Step-by-step reasoning following the 4-step protocol above",
   "evidence": "Exact line from logs/code showing the failure",
-  "fix_target": "Specific function name to fix (e.g., 'imports', 'main_block', 'forward_process', 'update_rho', 'reconstruction')",
+  "fix_target": "Comma-separated list of ALL function names that need fixing (e.g., 'imports', 'main_block', 'forward_process', 'update_rho', 'reconstruction'). If the same bug pattern appears in MULTIPLE functions, list ALL of them.",
   "feedback": "Actionable instruction: For Coder → quote the EXACT formula from plan to implement. For Planner → specify missing math term."
 }
 
@@ -75,6 +78,8 @@ ROOT CAUSES:
 4. If the SAME error has been repeating for multiple iterations, suggest a DIFFERENT approach (e.g., escalate from Coder to Planner for algorithm change).
 5. If code references external files that don't exist (.tif, .yaml, .h5, .csv), tell Coder to load data ONLY from `dataset/` directory (e.g., `dataset/raw_data.npz`) and `dataset/meta_data.json`.
 6. If __init__ is empty or unimplemented, assign to Coder with fix_target="__init__".
+7. **PATTERN-WIDE FIXES**: When a runtime error is caused by a specific API usage pattern (e.g., wrong argument type, unsupported parameter combination), SEARCH THE ENTIRE CODE for ALL occurrences of that same pattern across ALL functions. List EVERY affected function in fix_target, not just the one that crashed first. The crash site is only the first occurrence — the same bug likely exists elsewhere in the code.
+8. **JSON FORMAT**: Your output MUST be valid JSON. Do NOT include unescaped newlines, tabs, or special characters inside JSON string values. Use \\n for newlines within strings. Keep string values concise and on a single logical line where possible.
 """
 
     def _build_user_prompt(self, context: dict) -> str:

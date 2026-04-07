@@ -68,6 +68,8 @@ def get_full_response(client, model, messages, max_loops=5, max_tokens=32768, te
                     time.sleep(wait)
             
             # 解析响应
+            if not response.choices:
+                raise RuntimeError(f"API returned empty choices (response: {response})")
             choice = response.choices[0]
             content = choice.message.content or ""
             finish_reason = choice.finish_reason

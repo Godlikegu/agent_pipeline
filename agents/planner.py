@@ -23,24 +23,26 @@ class PlannerAgent(BaseAgent):
                 4. **Self-Contained**: The solution must only use files from `dataset/` directory for input data and `dataset/meta_data.json` for physical parameters. For `.npz` files, load with `np.load()` and access the correct key. No external files (.tif, .yaml, .h5, .csv, .mat) should be assumed. The data layout and available packages will be provided in the context.
                 5. **Simplicity First**: Prefer well-understood classical algorithms that are straightforward to implement in <200 lines of Python. Avoid complex deep learning architectures unless explicitly needed.
                 6. **Hyperparameter Scale Awareness**:
-                   - Check meta_data.json for output scale hints (e.g., ri_contrast_scale, noise_level).
-                   - Physics-based inverse problems often need MUCH larger learning rates (1-100) with plain gradient descent than typical ML tasks. Do NOT default to lr=1e-3 or 1e-4 without justification.
-                   - **Optimizer selection**:
-                     - For **differentiable physics forward models** (wave propagation, beam propagation, etc.) where the forward model is implemented in PyTorch with autograd: Use **plain gradient descent** (`x -= lr * grad`). Do NOT use Adam or other adaptive optimizers — they cause underdetermined inverse problems to converge to trivial solutions.
-                     - For **classical inverse problems with analytic gradients** (e.g., DFT-based imaging, deconvolution, closure quantity fitting): Use **L-BFGS-B** from scipy.optimize.minimize with `jac=True`. L-BFGS-B is the standard optimizer for these problems and converges much faster than gradient descent.
-                   - **Learning rate** (for gradient descent): For physics-based iterative reconstruction with amplitude-domain mean loss, use lr in the range 10–100 as a starting point. Do NOT auto-calibrate lr to be tiny (e.g., 1e-4).
-                   - **Log-image transform for positivity**: When the unknown is a non-negative image (e.g., brightness, intensity), optimize in **log-image space**: let `z = log(I)`, optimize over `z` (unconstrained), and recover `I = exp(z)`. This automatically ensures positivity and improves the optimization landscape. The gradient chain rule is: `grad_z = I * grad_I`. This is standard practice in radio interferometric imaging (ehtim) and many other fields.
-                   - **Regularization policy**: Start with NO regularization (weight=0) and rely only on simple constraints (e.g., positivity). Only add TV or other regularization if the task description explicitly mentions it, and even then start with a very small weight (e.g., 1e-4). Do NOT add upper-bound clamp constraints unless the task description explicitly specifies a value range.
-                   - For amplitude-domain losses (comparing sqrt(intensity)), use mean loss per angle (divide by N_pixels). This keeps gradient magnitudes independent of image resolution and makes lr values transferable.
-                   - Do NOT add gradient normalization, cosine annealing, warm restarts, or other sophisticated scheduling unless explicitly required.
+                   - Check meta_data.json for output scale hints.
+                   - **Optimizer selection**: Choose the simplest optimizer that fits the problem. For differentiable physics forward models with autograd support, prefer simple gradient descent. For classical problems with analytic gradients, consider L-BFGS-B. Justify your choice.
+                   - **Learning rate**: Calibrate lr by checking that `lr * max(|grad|)` produces reasonable per-step changes (typically 1-10% of expected output scale). Do NOT default to lr=1e-3 without justification — physics problems often need much larger lr.
+                   - **Positivity constraints**: For strictly positive unknowns, consider reparameterization (e.g., log-space) or simple clamping after each step.
+                   - **Regularization policy**: Default to minimal regularization. Only add regularization if the task description explicitly requests it. Do NOT add features not justified by the task (no gradient normalization, no cosine annealing, no warm restarts unless required).
+                   - **Loss normalization**: For per-sample losses (e.g., per-angle in multi-view problems), normalize each loss term by the number of spatial pixels. This keeps gradient magnitudes independent of resolution.
                 7. **Coordinate System & Dimensional Consistency**:
-                   - Before implementing any physics forward model, carefully read the task description for hints about coordinate conventions or unit systems. Use the SAME convention as described in the task — do not invent your own. If the task references a specific implementation (e.g., a GitHub repo or package), follow that implementation's coordinate convention.
-                   - After defining each operator, substitute actual parameter values from meta_data.json and verify the numerical magnitude is physically reasonable (e.g., phase shifts per slice should be O(0.01)–O(1), not O(100)+).
-                   - After implementing the complete forward model, verify it on a trivial input (e.g., zero contrast / identity case) — the output should match expectations (e.g., output intensity ≈ input intensity for zero scattering).
+                   - Before implementing any physics forward model, carefully read the task description for hints about coordinate conventions or unit systems. Use the SAME convention as described in the task — do not invent your own.
+                   - After defining each operator, substitute actual parameter values from meta_data.json and verify the numerical magnitude is physically reasonable.
+                   - After implementing the complete forward model, verify it on a trivial input (e.g., zero contrast / identity case) — the output should match expectations.
                    - **The learning rate MUST be calibrated to the operator magnitude**: Always verify by checking actual gradient magnitudes at iteration 0.
-                8. **Numerical Precision for Iterative Physics Models**:
-                   - For forward models that propagate fields through many sequential steps (e.g., >50 slices/layers), ALWAYS use float64/complex128. Float32 accumulates phase/rounding errors and can diverge to NaN/Inf.
+                8. **Numerical Precision**:
+                   - For iterative forward models with many sequential floating-point operations, consider using higher precision (float64/complex128) to prevent error accumulation. Specify precision requirements explicitly.
                    - If the forward model involves sequential FFT → multiply → IFFT steps, small per-step errors compound multiplicatively. Budget precision accordingly.
+                9. **Critical Detail Specification**: For EVERY operator and update rule in your plan:
+                   - Write the EXACT formula with explicit signs (e.g., "x_new = x - step * grad", NOT just "update x")
+                   - Specify whether masks/cutoffs should be smooth (sigmoid/exponential) or hard (binary)
+                   - Specify loss normalization convention (per-pixel, per-sample, or total sum)
+                   - Specify any numerical safeguards (epsilon values, clamp ranges, division guards)
+                   The Coder agent will implement EXACTLY what you write. Ambiguity leads to sign/convention errors.
 
                 ### Output Format (Markdown):
                 1. **[Problem Formulation]**: The math equation and variable definitions.
@@ -52,6 +54,11 @@ class PlannerAgent(BaseAgent):
                 - Step 4: Loss Function & Optimizer
                 4. **[Hyperparameters]**: List ALL numerical parameters with EXACT values (e.g., mu=1e-6, tau=0.0001, iterations=500). The Coder MUST use these exact values.
                 5. **[Sign Convention]**: For each update rule, explicitly state the sign (e.g., "x_new = x_old - step_size * gradient" — note the MINUS sign).
+                6. **[Critical Implementation Checklist]**: List 3-5 most error-prone implementation details. For each:
+                   - State the exact formula with correct sign
+                   - State what the WRONG implementation would look like
+                   - State smooth vs hard mask requirements
+                   - State normalization conventions
                 """
 
     def _build_user_prompt(self, context: Dict[str, Any]) -> str:
@@ -76,12 +83,19 @@ class PlannerAgent(BaseAgent):
         # Explicitly prompt to use injected skills if provided in dedicated field
         if context.get('knowledge_context'):
             prompt += "\n" + context['knowledge_context'] + "\n"
-            prompt += "\n### 🧠 SKILL UTILIZATION\n"
-            prompt += "The section above contains 'RELEVANT SKILLS' from past experiences.\n"
-            prompt += "1. **Analyze Applicability**: Determine if these skills apply to the CURRENT task. \n"
-            prompt += "   - If the task context (e.g., noise type, operator) is different, DO NOT blindly follow the skill.\n"
-            prompt += "2. **Explicit Reference**: If applicable, explicitly mention which skill you are using in your plan.\n"
-            prompt += "3. **Adaptation**: If the skill suggests a general strategy (e.g., 'Use ADMM'), adapt the specific formulas to the current forward model.\n"
+            prompt += "\n### 🧠 SKILL UTILIZATION (MANDATORY — HIGHEST PRIORITY)\n"
+            prompt += "The section above contains 'RELEVANT SKILLS' derived from validated reference implementations that PASSED evaluation.\n"
+            prompt += "⚠️ **These skills represent PROVEN implementation details. Your plan MUST incorporate them.**\n\n"
+            prompt += "1. **Analyze Applicability**: If the skills mention the same physics model or algorithm as this task, they ARE applicable. Only ignore a skill if the task is fundamentally different (e.g., different physics domain).\n"
+            prompt += "2. **MANDATORY Specifics**: When skills specify:\n"
+            prompt += "   - Coordinate conventions → Use EXACTLY that convention\n"
+            prompt += "   - Operator ordering → Use EXACTLY that ordering\n"
+            prompt += "   - Specific formulas → Copy VERBATIM into your plan\n"
+            prompt += "   - Hyperparameters → Use those EXACT values\n"
+            prompt += "   - Code patterns → Include as explicit plan steps\n"
+            prompt += "3. **Explicit Reference**: For EACH skill, state: 'Incorporating Skill: [title]' and copy the key formulas/code into the relevant plan step.\n"
+            prompt += "4. **Implementation Details Pass-Through**: Your [Step-by-Step Plan] MUST contain the exact mathematical expressions, code snippets, and numerical constants from applicable skills. The Coder agent CANNOT access skills directly — it relies entirely on your plan for these details.\n"
+            prompt += "5. **DO NOT override skills with your own intuition**: Skills are derived from code that PASSED evaluation — your intuition has not been validated. Follow specific values, conventions, and formulas from skills exactly.\n"
 
         # Fallback for legacy handling (if knowledge is still in task_desc)
         elif "RELEVANT SKILLS" in context['task_desc']:
