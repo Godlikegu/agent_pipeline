@@ -140,7 +140,7 @@ def format_failure_histories(histories: List[Dict], max_entries: int = 3) -> str
         evidence = hist.get('evidence', '').replace('\n', ' ').strip()[:100]
         formatted += (
             f"\n[Iter {iter_num} | {timestamp}] {error_type} → {fix_target}\n"
-            f"  Cause: {analysis[:80]}...\n"
+            f"  Cause: {analysis[:200]}...\n"
         )
         if evidence:
             formatted += f"  Evidence: {evidence}...\n"

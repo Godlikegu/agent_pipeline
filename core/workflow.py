@@ -16,6 +16,7 @@ import os
 import json
 import time
 import re
+import shutil
 import numpy as np
 from typing import Any
 
@@ -176,6 +177,12 @@ class PipelineWorkflow(WorkflowBase):
 
                 self._record_round_agent("Coder", self.current_code)
 
+                # Structural validation (nested classes, orphaned methods, etc.)
+                self.current_code, struct_issues = self._structural_validate_and_fix(self.current_code)
+                if struct_issues:
+                    with open(os.path.join(self.sandbox_dir, "solver.py"), "w", encoding="utf-8") as f:
+                        f.write(self.current_code)
+
                 syntax_ok = self._syntax_check_loop(iter_id)
                 if not syntax_ok:
                     self._finalize_round(success=False)
@@ -229,7 +236,23 @@ class PipelineWorkflow(WorkflowBase):
                 self._record_round_execution(success, stdout, stderr, metrics)
 
                 if eval_success and metrics:
-                    if self._check_threshold(metrics):
+                    passed = self._check_threshold(metrics)
+                    ncc = metrics.get("ncc", -1)
+
+                    # Track best result across iterations
+                    if (passed and not self.best_passed) or \
+                       (passed == self.best_passed and ncc > self.best_ncc):
+                        self.best_ncc = ncc
+                        self.best_iteration = iter_id
+                        self.best_passed = passed
+                        self.best_metrics = metrics.copy()
+                        best_path = os.path.join(self.sandbox_dir, "best_output.npy")
+                        src_path = os.path.join(self.sandbox_dir, "output.npy")
+                        if os.path.exists(src_path):
+                            shutil.copy2(src_path, best_path)
+                            self._log(f"  Best result saved (iter {iter_id}, NCC={ncc:.4f})")
+
+                    if passed:
                         self._finalize_round(success=True)
                         self._on_success(metrics, logs)
                         return True
@@ -783,9 +806,145 @@ class PipelineWorkflow(WorkflowBase):
             import traceback
             self._log(traceback.format_exc())
 
+    # ---- Visualization ----
+    def _generate_visualization(self):
+        """Generate GT vs output comparison images at end of task."""
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+        except ImportError:
+            self._log("  [Viz] matplotlib not available, skipping visualization.")
+            return
+
+        output_path = os.path.join(self.sandbox_dir, "output.npy")
+        gt_path = os.path.join(self.sandbox_dir, "dataset", "gt_output.npy")
+
+        if not os.path.exists(output_path):
+            self._log("  [Viz] No output.npy found, skipping.")
+            return
+
+        viz_dir = os.path.join(self.sandbox_dir, "visualization")
+        os.makedirs(viz_dir, exist_ok=True)
+
+        try:
+            pred_data = np.load(output_path, allow_pickle=True)
+            if pred_data.dtype == object:
+                pred_data = np.array(pred_data.tolist(), dtype=float)
+            pred_data = np.squeeze(pred_data)
+
+            gt_data = None
+            if os.path.exists(gt_path):
+                gt_data = np.load(gt_path, allow_pickle=True)
+                if gt_data.dtype == object:
+                    gt_data = np.array(gt_data.tolist(), dtype=float)
+                gt_data = np.squeeze(gt_data)
+
+            # Compute metrics for annotation
+            ncc_val, nrmse_val = None, None
+            if gt_data is not None:
+                gt_eval = np.abs(gt_data) if np.iscomplexobj(gt_data) else gt_data.copy()
+                pred_eval = np.abs(pred_data) if np.iscomplexobj(pred_data) else pred_data.copy()
+                gt_f = gt_eval.ravel().astype(np.float64)
+                pred_f = pred_eval.ravel().astype(np.float64)
+                min_len = min(len(gt_f), len(pred_f))
+                gt_f, pred_f = gt_f[:min_len], pred_f[:min_len]
+                pred_c = pred_f - pred_f.mean()
+                gt_c = gt_f - gt_f.mean()
+                ncc_val = float(np.sum(pred_c * gt_c) / (np.linalg.norm(pred_c) * np.linalg.norm(gt_c) + 1e-10))
+                rmse = float(np.sqrt(np.mean((pred_f - gt_f) ** 2)))
+                val_range = float(gt_f.max() - gt_f.min() + 1e-30)
+                nrmse_val = rmse / val_range
+
+            # Get 2D display slices
+            def get_display(arr):
+                arr = np.squeeze(arr)
+                if np.iscomplexobj(arr):
+                    arr = np.abs(arr)
+                if arr.ndim <= 1:
+                    return arr
+                if arr.ndim == 2:
+                    return arr
+                if arr.ndim == 3:
+                    if arr.shape[0] <= 20:
+                        return arr[arr.shape[0] // 2]
+                    elif arr.shape[-1] <= 20:
+                        return arr[:, :, arr.shape[-1] // 2]
+                    return arr[arr.shape[0] // 2]
+                if arr.ndim == 4:
+                    arr = arr[0]
+                    return arr[arr.shape[0] // 2] if arr.shape[0] <= 20 else arr[:, :, arr.shape[-1] // 2]
+                return arr.reshape(-1)
+
+            pred_disp = get_display(pred_data)
+            gt_disp = get_display(gt_data) if gt_data is not None else None
+
+            # Create comparison figure
+            if pred_disp.ndim == 1 or (gt_disp is not None and gt_disp.ndim == 1):
+                fig, ax = plt.subplots(1, 1, figsize=(12, 5))
+                if gt_disp is not None:
+                    ax.plot(gt_disp.ravel(), label='Ground Truth', alpha=0.8)
+                ax.plot(pred_disp.ravel(), label='Pipeline Output', alpha=0.8)
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+            else:
+                n_panels = (1 if gt_disp is not None else 0) + 1 + (1 if gt_disp is not None else 0)
+                fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 5))
+                if n_panels == 1:
+                    axes = [axes]
+                idx = 0
+                vmin, vmax = None, None
+                if gt_disp is not None:
+                    all_vals = np.concatenate([gt_disp.ravel(), pred_disp.ravel()])
+                    vmin, vmax = np.percentile(all_vals, 1), np.percentile(all_vals, 99)
+                    im = axes[idx].imshow(gt_disp, cmap='viridis', vmin=vmin, vmax=vmax)
+                    axes[idx].set_title('Ground Truth')
+                    axes[idx].axis('off')
+                    plt.colorbar(im, ax=axes[idx], fraction=0.046, pad=0.04)
+                    idx += 1
+
+                im = axes[idx].imshow(pred_disp, cmap='viridis', vmin=vmin, vmax=vmax)
+                axes[idx].set_title('Pipeline Output')
+                axes[idx].axis('off')
+                plt.colorbar(im, ax=axes[idx], fraction=0.046, pad=0.04)
+                idx += 1
+
+                if gt_disp is not None:
+                    gt_r = gt_disp.astype(np.float64)
+                    pred_r = pred_disp.astype(np.float64)
+                    min_shape = tuple(min(g, p) for g, p in zip(gt_r.shape, pred_r.shape))
+                    gt_r = gt_r[tuple(slice(0, s) for s in min_shape)]
+                    pred_r = pred_r[tuple(slice(0, s) for s in min_shape)]
+                    diff = np.abs(gt_r - pred_r)
+                    im = axes[idx].imshow(diff, cmap='hot')
+                    axes[idx].set_title('|Difference|')
+                    axes[idx].axis('off')
+                    plt.colorbar(im, ax=axes[idx], fraction=0.046, pad=0.04)
+
+            metric_str = ""
+            if ncc_val is not None:
+                metric_str = f"NCC={ncc_val:.4f}, NRMSE={nrmse_val:.4f}"
+            if self.best_iteration > 0:
+                metric_str += f" (best iter {self.best_iteration})"
+            fig.suptitle(f'{self.task_name}\n{metric_str}', fontsize=14, fontweight='bold')
+            plt.tight_layout()
+
+            save_path = os.path.join(viz_dir, f'{self.task_name}_comparison.png')
+            fig.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            self._log(f"  [Viz] Saved to {save_path}")
+
+            # Also copy to snapshot dir
+            snapshot_viz = os.path.join(self.snapshot_dir, "visualization.png")
+            shutil.copy2(save_path, snapshot_viz)
+
+        except Exception as e:
+            self._log(f"  [Viz] Visualization failed: {e}")
+
     # ---- Success/Failure handlers ----
     def _on_success(self, metrics, logs):
         self._save_snapshot(self.retry_count + 1, "final_success", {"metrics": metrics})
+        self._generate_visualization()
         self._write_trajectories("success")
         self._post_task_skills_analysis("success")
         self.generate_knowledge_report(success=True)
@@ -794,6 +953,14 @@ class PipelineWorkflow(WorkflowBase):
         # Finalize last round if still open
         if self._current_round:
             self._finalize_round(success=False)
+        # Restore best result if available
+        best_path = os.path.join(self.sandbox_dir, "best_output.npy")
+        output_path = os.path.join(self.sandbox_dir, "output.npy")
+        if os.path.exists(best_path):
+            shutil.copy2(best_path, output_path)
+            self._log(f"  Restored best result from iter {self.best_iteration} "
+                      f"(NCC={self.best_ncc:.4f})")
+        self._generate_visualization()
         self._write_trajectories("failure")
         self._post_task_skills_analysis("failure")
         self.failure_history.clear()

@@ -11,6 +11,8 @@ Your Mission: Diagnose the ROOT CAUSE of failure with surgical precision.
 
 #### STEP 1: CHECK SYNTAX & IMPORTS
 - Errors: SyntaxError, IndentationError, ImportError, NameError, AttributeError (missing method)
+- STRUCTURAL errors: Nested class definitions (class inside class), methods with `self` parameter defined at module scope instead of inside a class, duplicate class names in the same file, orphaned executable code between class body and `if __name__`. These are ALWAYS Coder bugs — the code structure is broken regardless of algorithm correctness.
+- Check: If error is `AttributeError: 'X' object has no attribute 'Y'` and Y IS defined in the code but at wrong scope/nesting level, this is a STRUCTURAL error → Coder. Set fix_target to the function/method that caused the crash AND "full_rewrite" to signal structural repair.
 - VERDICT → "Coder"
 - WHY: Code is not valid Python or misuses libraries.
 

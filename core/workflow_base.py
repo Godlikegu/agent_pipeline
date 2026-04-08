@@ -11,7 +11,9 @@ import sys
 import json
 import time
 import ast
+import shutil
 import datetime
+import textwrap
 from typing import List, Dict, Tuple, Any, Optional
 
 from agents.planner import PlannerAgent, CriticAgent
@@ -101,6 +103,12 @@ class WorkflowBase:
 
         self.top_k_planner = retrieval_cfg.get("top_k_planner", 3)
         self.top_k_coder = retrieval_cfg.get("top_k_coder", 4)
+
+        # Best NCC tracking across iterations
+        self.best_ncc = -1.0
+        self.best_iteration = 0
+        self.best_passed = False
+        self.best_metrics = {}
 
         self.used_knowledge_ids: set = set()
         self.distillation_stats = {"knowledge_general": 0, "knowledge_task_specific": 0, "code": 0}
@@ -401,6 +409,193 @@ class WorkflowBase:
                 self._log(f"  [System] Knowledge injection failed: {e}")
 
         return context
+
+    # ---- structural validation ----
+    def _structural_validate_and_fix(self, code: str) -> Tuple[str, List[str]]:
+        """Detect and fix structural code issues that pass syntax checks but crash at runtime.
+
+        Returns (fixed_code, list_of_issues_found). If no issues, returns (code, []).
+        """
+        issues = []
+        try:
+            tree = ast.parse(code)
+        except SyntaxError:
+            return code, []  # syntax errors handled elsewhere
+
+        lines = code.split("\n")
+
+        # 1. Detect nested class definitions
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                for child in node.body:
+                    if isinstance(child, ast.ClassDef):
+                        issues.append(
+                            f"Nested class '{child.name}' inside '{node.name}' "
+                            f"(line {child.lineno})"
+                        )
+
+        # 2. Detect orphaned methods (self parameter at module scope)
+        top_level_classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                args = [a.arg for a in node.args.args]
+                if args and args[0] == "self":
+                    issues.append(
+                        f"Orphaned method '{node.name}' with 'self' at module scope "
+                        f"(line {node.lineno}) — should be inside a class"
+                    )
+
+        # 3. Detect duplicate class definitions
+        class_names = [n.name for n in tree.body if isinstance(n, ast.ClassDef)]
+        seen = set()
+        for name in class_names:
+            if name in seen:
+                issues.append(f"Duplicate class definition '{name}'")
+            seen.add(name)
+
+        if not issues:
+            return code, []
+
+        self._log(f"  [Structural] Found {len(issues)} issues: {issues}")
+
+        # Attempt auto-fix
+        try:
+            code = self._structural_autofix(code, tree)
+            # Verify the fix parses
+            ast.parse(code)
+            self._log("  [Structural] Auto-fix applied successfully.")
+        except Exception as e:
+            self._log(f"  [Structural] Auto-fix failed: {e}")
+
+        return code, issues
+
+    def _structural_autofix(self, code: str, tree: ast.Module) -> str:
+        """Attempt to fix structural issues by rewriting the AST."""
+        lines = code.split("\n")
+
+        # Collect all top-level class ranges
+        top_classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+
+        # Fix 1: Flatten nested classes — merge inner class body into outer class
+        for cls_node in top_classes:
+            nested = [n for n in cls_node.body if isinstance(n, ast.ClassDef)]
+            if not nested:
+                continue
+            # Strategy: remove the inner class header and dedent its methods
+            # so they become part of the outer class
+            for inner in nested:
+                inner_start = inner.lineno - 1  # 0-indexed
+                inner_end = inner.end_lineno  # exclusive
+                # Find methods in inner class
+                inner_methods = [n for n in inner.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+                if inner_methods:
+                    # Remove the inner class def line + any decorators
+                    # Keep the method bodies, dedented by one level (4 spaces)
+                    new_lines = []
+                    for i in range(inner_start, inner_end):
+                        line = lines[i]
+                        # Skip the 'class Foo:' line itself
+                        if i == inner_start:
+                            continue
+                        # Dedent by 4 spaces (remove one nesting level)
+                        if line.startswith("        "):  # 8 spaces -> 4 spaces
+                            new_lines.append(line[4:])
+                        else:
+                            new_lines.append(line)
+                    # Replace the inner class range with dedented methods
+                    lines[inner_start:inner_end] = new_lines
+
+        code = "\n".join(lines)
+        # Re-parse after nested class fix
+        tree = ast.parse(code)
+        lines = code.split("\n")
+
+        # Fix 2: Move orphaned self-methods into the last class before __main__
+        top_classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+        orphaned_funcs = []
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                args = [a.arg for a in node.args.args]
+                if args and args[0] == "self":
+                    orphaned_funcs.append(node)
+
+        if orphaned_funcs and top_classes:
+            target_class = top_classes[-1]
+            # Find the end of the target class
+            class_end = target_class.end_lineno  # 1-indexed, inclusive
+
+            # Extract orphaned method lines, indent them to class level (4 spaces)
+            insert_lines = []
+            remove_ranges = []
+            for func in orphaned_funcs:
+                start = func.lineno - 1
+                end = func.end_lineno
+                func_lines = lines[start:end]
+                # Indent each line by 4 spaces
+                indented = ["    " + l if l.strip() else l for l in func_lines]
+                insert_lines.append("")  # blank separator
+                insert_lines.extend(indented)
+                remove_ranges.append((start, end))
+
+            # Remove orphaned functions (reverse order to preserve indices)
+            for start, end in reversed(remove_ranges):
+                del lines[start:end]
+
+            # Re-find class end after removals
+            # Reparse to get correct positions
+            temp_code = "\n".join(lines)
+            temp_tree = ast.parse(temp_code)
+            for n in temp_tree.body:
+                if isinstance(n, ast.ClassDef) and n.name == target_class.name:
+                    class_end = n.end_lineno
+                    break
+
+            # Insert at class end
+            for i, line in enumerate(insert_lines):
+                lines.insert(class_end + i, line)
+
+            code = "\n".join(lines)
+            tree = ast.parse(code)
+            lines = code.split("\n")
+
+        # Fix 3: Merge duplicate class definitions
+        top_classes = [n for n in tree.body if isinstance(n, ast.ClassDef)]
+        class_groups = {}
+        for cls in top_classes:
+            class_groups.setdefault(cls.name, []).append(cls)
+
+        for name, defs in class_groups.items():
+            if len(defs) <= 1:
+                continue
+            # Keep the first definition, merge methods from later ones
+            primary = defs[0]
+            primary_methods = {n.name for n in primary.body if isinstance(n, ast.FunctionDef)}
+            for dup in defs[1:]:
+                dup_start = dup.lineno - 1
+                dup_end = dup.end_lineno
+                # Extract new methods not in primary
+                new_methods_lines = []
+                for item in dup.body:
+                    if isinstance(item, ast.FunctionDef) and item.name not in primary_methods:
+                        method_lines = lines[item.lineno - 1:item.end_lineno]
+                        new_methods_lines.append("")
+                        new_methods_lines.extend(method_lines)
+                        primary_methods.add(item.name)
+                # Remove the duplicate class
+                lines[dup_start:dup_end] = []
+                # Insert new methods at end of primary class
+                if new_methods_lines:
+                    # Re-parse to find current primary end
+                    temp_code = "\n".join(lines)
+                    temp_tree = ast.parse(temp_code)
+                    for n in temp_tree.body:
+                        if isinstance(n, ast.ClassDef) and n.name == name:
+                            insert_at = n.end_lineno
+                            for i, line in enumerate(new_methods_lines):
+                                lines.insert(insert_at + i, line)
+                            break
+
+        return "\n".join(lines)
 
     # ---- state management ----
     def _reset_downstream_state(self, ticket: str):
