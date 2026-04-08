@@ -1,293 +1,339 @@
-## 项目简介：Agent 化逆问题求解 Pipeline
+# Agent Pipeline: Autonomous Solver for Computational Inverse Problems
 
-本项目是一个面向「物理逆问题 / 科学计算」的自动化求解流水线。  
-整体流程由多个智能 Agent（Planner / Architect / Coder / Judge 等）配合完成，从任务描述与 GT 代码出发，自动生成数据、编写求解器、运行评估脚本并给出最终指标。
+A multi-agent LLM pipeline that autonomously solves scientific inverse problems in computational imaging, MRI reconstruction, seismic inversion, and more. Given only a **task description** and **input data**, the system plans, designs, implements, executes, and iteratively debugs a Python solver — with no human intervention.
+
+## Key Results
+
+- **51 tasks** spanning CT reconstruction, MRI, ptychography, EHT black hole imaging, seismic FWI, optical diffraction tomography, and more
+- **Multi-iteration self-healing**: Planner -> Critic -> Architect -> Coder -> Execution -> Judge loop with automatic bug diagnosis and targeted fix routing
+- **Per-task isolated environments**: Each task gets its own conda env with the exact dependencies it needs
+- **Skill system**: Optional cross-task knowledge transfer — successful implementations are distilled into reusable skills
 
 ---
 
-## 工作流与模块调用关系
-
-### 1. 整体工作流程图
+## Architecture
 
 ```
-配置文件 (YAML)
-    │
-    ▼
-  run_task.py ──── 对每个任务 ───-─┐
-    │                             │
-    ▼                             ▼
-创建 Workflow ────────> InverseProblemWorkflow.run()
-(传入 skill_manager        │
-引用，不预注入知识)         ├─── 0. Phase 0 准备（沙箱 + 数据生成 + 评估脚本）
-                          ├─── 1. 规划器 → 数学方案（Critic 审查）
-                          │       ↑ 每个 Agent 调用前通过
-                          │         _build_context_with_memory()
-                          │         独立检索并注入分层知识
-                          ├─── 2. 架构师 → 代码骨架
-                          ├─── 3. 编码器 → 完整实现
-                          │       (imports → init → methods → main)
-                          ├─── 4. 执行 (subprocess) + 评估
-                          ├─── 5. 评审官 → 通过/失败 + 诊断
-                          │       │
-                          │       ├─ 通过 → 蒸馏知识（实例+经验）
-                          │       └─ 失败 → 修复工单 → ticket 调度
-                          │              │  → Coder/Architect/Planner
-                          │              └─ 最终失败 → 仅蒸馏经验
-                          │
-                          ▼
-                    报告生成 (JSON)
+                          Task Description (README.md)
+                          + Input Data (dataset/)
+                                    |
+                                    v
+                    +-------------------------------+
+                    |         run_task.py            |
+                    |  (entry point, sandbox setup)  |
+                    +-------------------------------+
+                                    |
+                    +-------------------------------+
+                    |      PipelineWorkflow          |
+                    |      (core/workflow.py)         |
+                    +-------------------------------+
+                                    |
+            +-----------+-----------+-----------+-----------+
+            |           |           |           |           |
+            v           v           v           v           v
+        Planner     Critic     Architect     Coder       Judge
+       (math plan)  (review)   (skeleton)   (implement)  (diagnose)
+            |                       |           |           |
+            +--- feedback loop -----+-----------+-----------+
+                                    |
+                                    v
+                            Sandbox Execution
+                            (subprocess: solver.py)
+                                    |
+                                    v
+                            Evaluation (NCC/NRMSE)
+                                    |
+                            Pass? ---> Done + Visualization
+                            Fail? ---> Judge routes fix ticket
+                                       back to Planner/Architect/Coder
 ```
 
-整体可以理解为：
+### Agent Roles
 
-- **外层调度**：`run_task.py` 负责“读配置 + 循环所有任务”。  
-- **任务内主循环**：`core/workflow.py` / `core/workflow_base.py` 负责一次完整的「规划 → 设计 → 写代码 → 运行 → 评估 → 失败重试」。  
-- **环境与执行**：`core/sandbox.py` / `core/executor.py` 在 `sandbox_root` 下搭建隔离环境并真正执行 `solver.py` / `eval_script.py`。  
-- **智能决策**：`agents/*.py` 是一组不同角色的 Agent，包装了对 LLM 的调用逻辑。  
-- **工具层**：`utils/*.py` 提供通用工具，如配置加载、文本解析、代码编辑、最终报告等。
+| Agent | File | Role |
+|-------|------|------|
+| **Planner** | `agents/planner.py` | Formulates the mathematical model, forward operator, and step-by-step algorithm |
+| **Critic** | `agents/planner.py` | Reviews and challenges the Planner's proposal before implementation |
+| **Architect** | `agents/architect.py` | Designs the `InverseSolver` class skeleton (interfaces, method signatures) |
+| **Coder** | `agents/coder.py` | Implements each function, merges into the full solver via AST-based code editing |
+| **Judge** | `agents/judge.py` | Diagnoses failures using a 4-step protocol (syntax -> interface -> fidelity -> algorithm) and routes fix tickets |
 
-### 2. 代码结构总览
+### Supporting Modules
 
-项目主要目录结构（省略部分细节）：
+| Module | Purpose |
+|--------|---------|
+| `core/workflow.py` | Main iteration loop, best-result tracking, visualization |
+| `core/workflow_base.py` | Base class: state management, structural validation, skills injection, trajectory recording |
+| `core/sandbox.py` | Subprocess execution of solver/eval scripts in isolated sandbox |
+| `utils/code_editor.py` | AST-based code merger (replace function/imports/main block without breaking surrounding code) |
+| `utils/text_utils.py` | Extract JSON/Python from LLM output, format failure histories |
+| `utils/reporter.py` | Aggregate multi-task results into execution reports |
+| `skills/` | Optional skill system: retrieval, learning, distillation from trajectories |
+| `code_cleaner/` | Environment setup: auto-create per-task conda envs from `requirements.txt` |
 
-```text
-pipeline/
-  run_task.py           # 入口脚本（python -m run_task）
-  run.sh                # 示例运行脚本（后台 + 重定向日志）
-  README.md             # 使用文档（本文件）
+---
+
+## Project Structure
+
+```
+agent_pipeline/
+  run_task.py                  # Entry point
+  run.sh                       # Batch run script
+  create_env.sh                # Environment setup shortcut
 
   config/
-    default.yaml        # 主配置：路径、pipeline 参数、skills 等
-    llm.yaml            # LLM 列表与网关配置
+    default.yaml               # Pipeline params, eval thresholds, skills config
+    llm.yaml                   # LLM endpoints and API keys
     tasks/
-      debug_tasks.yaml  # 调试任务列表
-      train_tasks.yaml  # 训练/大规模任务列表
-      test_tasks.yaml   # 测试/评测任务列表
+      auto_tasks.yaml          # Task list (name, python_path, task_dir)
 
   core/
-    __init__.py
-    workflow_base.py    # InverseProblemBase，管理 sandbox / agent / 配置 / 日志等公共逻辑
-    workflow.py         # InverseProblemWorkflow，具体“多轮迭代 + 执行 + 评估”的主流程
-    sandbox.py          # sandbox 目录搭建与 run_cmd（子进程执行 solver.py / eval_script.py）
-    executor.py         # Phase 0（数据生成 + 评估脚本生成）相关逻辑
+    workflow.py                # Main pipeline loop (Planner->Judge iteration)
+    workflow_base.py           # Base class: agents, state, structural validation
+    sandbox.py                 # Subprocess runner
 
   agents/
-    __init__.py
-    base.py             # BaseAgent，封装通用的 LLM 调用逻辑与 prompt 组装
-    planner.py          # PlannerAgent，负责从任务描述出发规划整体求解思路
-    architect.py        # ArchitectAgent，根据 plan 生成代码骨架（class InverseSolver 框架）
-    coder.py            # CoderAgent，根据骨架和反馈生成/修复 solver.py 代码
-    judge.py            # JudgeAgent，分析运行/评估结果，给出错误分析与改进建议
-    sandbox_agents.py   # DataGenAgent / EvalGenAgent，用于生成 data_gen.py 和 eval_script.py
+    base.py                    # BaseAgent: LLM call with auto-continuation
+    planner.py                 # PlannerAgent + CriticAgent
+    architect.py               # ArchitectAgent
+    coder.py                   # CoderAgent with AST merge
+    judge.py                   # JudgeAgent with 4-step diagnostic
+    sandbox_agents.py          # DataGenAgent, EvalGenAgent
+    skills_generator.py        # Post-task skill distillation
+    code_diff_analyzer.py      # Reference vs generated code comparison
 
   utils/
-    __init__.py
-    config_loader.py    # 统一加载 default.yaml + 可选覆盖配置
-    llm_client.py       # 创建 OpenAI 兼容客户端（封装 base_url/api_key/model_name）
-    text_utils.py       # 从 LLM 输出中抽取 JSON / Python 代码等工具
-    code_editor.py      # 对现有代码做 patch / merge 的工具逻辑
-    reporter.py         # ExecutionReporter，聚合多任务结果并导出 JSON 报告
+    code_editor.py             # AST-based code merge (replace_function, replace_imports, etc.)
+    config_loader.py           # YAML config loading with defaults
+    llm_client.py              # OpenAI-compatible client factory
+    text_utils.py              # JSON/Python extraction from LLM output
+    reporter.py                # Multi-task execution report generator
 
-  data/                 # 运行时使用的数据、技能数据库等
-  reports/              # 运行结束后的汇总报告（execution_report_*.json 等）
-  tests/                # 单元测试与集成测试
-  (TODO) code_cleaner/         # 从github raw code清洗为标准code
-  (TODO) prompt_optimizer/     # Prompt/技能相关的优化组件，使用textgrad优化
-  (TODO) task_gen/             # 直接从paper和user_prompt生成task_description，无需code
-  (TODO) skills/               # （可选）技能系统与知识库，实现跨任务经验复用,目前使用的是Jiahe开发的老版本
+  skills/
+    __init__.py                # Factory: create_skill_manager()
+    file_manager.py            # FileSkillManager: retrieval + learning
+    file_store.py              # Skill storage with embedding search
+    ablation.py                # NoSkillManager (disabled mode)
+
+  code_cleaner/
+    environment.py             # CondaEnvManager: auto-create per-task envs
+    cli.py                     # CLI for env-setup command
+
+  data/
+    tasks/                     # 51 task directories
+      <task_name>/
+        README.md              # Task description
+        requirements.txt       # Python dependencies
+        main.py                # Reference implementation (not exposed to agents)
+        data/                  # Input data (raw_data.npz, meta_data.json, ground_truth.npz)
+        evaluation/
+          metrics.json         # Per-task NCC/NRMSE thresholds
+          eval_script.py       # Evaluation script
+
+  test_conda_envs/             # Auto-generated per-task conda environments
+    task_<name>/python.exe
 ```
 
 ---
 
-## 环境配置
+## Quick Start
 
-### 1. 系统与基础依赖
-
-- **操作系统**：Linux（推荐，其他系统需自行适配路径）
-- **Python**：推荐 `Python 3.10`（与当前 `agent` 环境一致）
-- **Conda**：建议使用 conda 管理环境（`miniconda` / `anaconda` 均可）
-
-### 2. 创建并激活 Conda 环境
+### 1. Install Base Dependencies
 
 ```bash
 conda create -n agent python=3.10 -y
 conda activate agent
+pip install openai pyyaml numpy
 ```
 
-### 3. 安装 Python 依赖
+### 2. Configure LLM
 
-项目依赖主要包括：
-
-- **openai**：统一的 OpenAI 兼容客户端（可接 Anthropic / DeepSeek / Kimi / Qwen 等）
-- **yaml 相关库**：`pyyaml`
-- **科学计算**：`numpy`（用于数据加载 / 评估脚本）
-
-如果你已有自己的 `requirements.txt`，可按需调整：
-
-```bash
-pip install openai pyyaml numpy scikit-learn pandas tabulate
-pip install sentence-transformers scipy scikit-image
-```
-
-> 如任务本身（GT 代码 / solver）依赖额外库（如 `torch`、`scipy` 等），请自行在当前环境中额外安装。
-
-### 4. LLM 配置 (`config/llm.yaml`)
-
-`config/llm.yaml` 中配置了可用的大模型列表，每个条目代表一个可选模型，例如：
+Edit `config/llm.yaml`:
 
 ```yaml
 models:
-  "cds/Claude-4.6-opus":
+  "Vendor2/Claude-4.6-opus":
     api_type: "openai"
-    base_url: "https://ai-gateway-internal.dp.tech/v1"
+    base_url: "https://your-api-gateway/v1"
     api_key: "YOUR_API_KEY"
-    temperature: 0.7
 ```
 
-- **models**：模型字典，Key 为命令行参数 `--model` 的取值，同样也作为model_name存在。
-- **api_type**：API 类型（目前代码只用到了 OpenAI 兼容风格）。
-- **base_url**：对应模型的 OpenAI 兼容接口地址。
-- **api_key**：访问该接口所需密钥。
-- **temperature**：采样温度，越大越发散，越小越稳定。
+### 3. Set Up Task Environments
 
-> 注意：仓库中示例 key / url 仅为示例，请根据你实际的网关 / 账号信息进行替换。
+Each task requires its own Python environment with the correct dependencies:
 
-### 5. Pipeline 主配置 (`config/default.yaml`)
+```bash
+# Auto-create all task environments from requirements.txt
+python -m code_cleaner env-setup \
+  --tasks-dir data/tasks \
+  --envs-dir ./test_conda_envs \
+  --model Vendor2/Claude-4.6-opus \
+  --output-yaml config/tasks/auto_tasks.yaml
+```
 
-关键字段说明（常用的几项）：
+Or use the shortcut:
+```bash
+bash create_env.sh
+```
 
-- **paths**
-  - `sandbox_root`：所有任务运行时的 sandbox 根目录，**所有自动生成的代码 / 数据 / 日志都在这里**。  
-    - 每个任务会在该目录下创建独立子目录：`{sandbox_root}/{task_name}_sandbox/`。
-  - `skills_db`：技能系统使用的 SQLite 数据库路径（默认 `./data/skills.db`）。
-- **pipeline**
-  - `max_retries`：主循环最大重试次数（Planner/Architect/Coder 的大循环）。
-  - `execution_timeout`：`solver.py` 执行超时时间（秒）。
-  - `data_gen_timeout`：数据生成脚本 `data_gen.py` 超时。
-  - `syntax_check_timeout`：语法检查（`py_compile`）超时。
-  - `gt_code_snippet_limit`：注入给 LLM 的 GT 代码截断长度（字符数）。
-  - `code_size_guard`：生成代码的长度上限，防止无限膨胀。
-- **evaluation**
-  - `min_guaranteed_psnr`：PSNR 最低保证阈值。
-  - `baseline_ratio`：基线 PSNR 的比例系数，最终阈值为 `max(baseline_psnr * ratio, min_guaranteed_psnr)`。
-- **skills（重要）**
-  - `enabled`：是否启用技能系统（知识库），**默认是 `false`，即整个 Skills 系统默认关闭**。  
-    - 如需启用，请改为 `true`，并确保 `skills_db` / `embedding_model_dir` 等路径可用。
-  - `mode`：技能注入模式，`"default" | "none" | "instance" | "experience" | "instance_exp"`。
-  - `retrieval`：控制一次检索多少条经验、相似度阈值、token 预算等。
-  - `credit`：经验条目的信用分更新策略（成功涨分，失败降分，低于阈值自动归档）。
-  - `embedding`：技能检索使用的向量模型名称与维度。
+### 4. Run
+
+```bash
+# Run all tasks
+bash run.sh
+
+# Run specific tasks
+TASK_FILTER=hessian_sim,lucky_imaging bash run.sh
+
+# Or directly
+python -m run_task \
+  --task-config config/tasks/auto_tasks.yaml \
+  --model Vendor2/Claude-4.6-opus \
+  --task-filter SSNP_ODT
+```
 
 ---
 
-## 任务配置说明 (`config/tasks/*.yaml`)
+## Configuration
 
-项目中的任务列表由 `config/tasks/*.yaml` 描述，例如 `debug_tasks.yaml`：
+### Pipeline Parameters (`config/default.yaml`)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `pipeline.max_retries` | 5 | Maximum Planner->Judge iterations per task |
+| `pipeline.execution_timeout` | 1800 | Solver execution timeout (seconds) |
+| `pipeline.syntax_check_timeout` | 30 | Syntax check timeout (seconds) |
+| `pipeline.code_size_guard` | 12000 | Max generated code length (chars) |
+| `evaluation.min_ncc` | 0.85 | Global NCC pass threshold |
+| `evaluation.max_nrmse` | 0.5 | Global NRMSE pass threshold |
+
+Per-task thresholds override globals via `data/tasks/<name>/evaluation/metrics.json`.
+
+### Skills System
+
+```yaml
+skills:
+  retrieval_enabled: false    # Enable skill retrieval (read-only)
+  learning_enabled: false     # Enable skill learning from trajectories
+```
+
+When enabled, the system:
+1. **Retrieves** relevant skills from past tasks and injects them into Planner/Coder prompts
+2. **Distills** new skills from successful/failed trajectories after each task
+3. **Promotes** validated skills from draft to permanent status
+
+### Task Configuration (`config/tasks/auto_tasks.yaml`)
 
 ```yaml
 tasks:
-  - gt_code_path: /path/to/sim_code.py
-    name: sim
-    python_path: /path/to/conda/envs/sim/bin/python
-    task_description_path: /path/to/task_description.md   # 可选，直接指定任务描述文件
-
-  - gt_code_path: /path/to/bpm_code.py
-    name: bpm
-    python_path: /path/to/conda/envs/ragas/bin/python
+  - name: SSNP_ODT
+    python_path: ./test_conda_envs/task_SSNP_ODT/python.exe
+    task_description_path: ./data/tasks/SSNP_ODT/README.md
+    task_dir: ./data/tasks/SSNP_ODT
 ```
-
-字段含义：
-
-- **gt_code_path**：该任务的 GT（Ground Truth）代码路径，可为单文件或目录。
-- **name**：任务名称，用于筛选与日志标识（如 `--task-filter sim`）。
-- **python_path**：执行该任务时使用的 Python 解释器路径（例如另一 conda 环境）。  
-  - 如果留空，代码会回退为当前运行 `run_task.py` 的 Python。
-- **task_description_path**：可选。直接指定任务描述 md 文件路径；若不提供，则需提供 `paper_markdown_path` 由 LLM 生成。
-
-`train_tasks.yaml` / `test_tasks.yaml` 的结构与此类似，只是具体任务列表不同。
 
 ---
 
-## 运行方式与参数说明
+## Pipeline Details
 
-### 1. 直接运行单次调试（推荐）
+### Iteration Flow
 
-最常用的入口是：
+1. **Planner** reads the task description and proposes a mathematical algorithm
+2. **Critic** reviews the plan (up to 3 rounds of revision)
+3. **Architect** designs a `class InverseSolver` skeleton with method signatures
+4. **Coder** implements each function, using AST-based merge to preserve existing code
+5. **Structural Validator** checks for nested classes, orphaned methods, duplicate definitions
+6. **Syntax Check** with auto-fix (up to 5 attempts)
+7. **Execution** in sandbox subprocess with timeout
+8. **Evaluation** via `eval_script.py` computing NCC and NRMSE against ground truth
+9. **Judge** diagnoses failure and routes a fix ticket:
+   - Syntax/structural errors -> **Coder**
+   - Interface mismatches -> **Architect**
+   - Implementation deviates from plan -> **Coder** (with specific fix target)
+   - Algorithm fundamentally wrong -> **Planner** (full replanning)
 
-```bash
-cd /your/pipeline/path   # 替换为你的仓库路径
+### Best Result Tracking
 
-python -m run_task \
-  --task-config config/tasks/debug_tasks.yaml \
-  --llm-config config/llm.yaml \
-  --model "cds/Claude-4.6-opus" \
-  --task-filter sim
-```
+The pipeline tracks the best NCC across all iterations. If the final iteration regresses, the best result is automatically restored. Passed iterations are always prioritized over non-passed ones.
 
-#### `run_task.py` 主要参数
+### Visualization
 
-- `**--config**`（可选）  
-  - 说明：覆盖默认配置路径（否则使用 `config/default.yaml`）。  
-  - 示例：`--config /path/to/custom_config.yaml`。
-- `**--task-config**`  
-  - 说明：任务列表配置文件，默认 `config/tasks/debug_tasks.yaml`。  
-  - 示例：`--task-config config/tasks/train_tasks.yaml`。
-- `**--llm-config**`  
-  - 说明：LLM 配置文件路径，默认 `config/llm.yaml`。
-- `**--model**`  
-  - 说明：在 `llm.yaml` 的 `models` 字典中选择一个 key。  
-  - 示例：`--model "cds/Claude-4.6-opus"`。
-- `**--task-filter**`  
-  - 说明：按任务 `name` 进行筛选，逗号分隔。  
-  - 示例：`--task-filter sim,bpm` 只运行名为 `sim` 和 `bpm` 的任务。  
-  - 若不指定，则运行该 `task-config` 中的全部任务。
+At the end of each task (success or failure), the pipeline generates a comparison image:
+- Ground Truth | Pipeline Output | |Difference|
+- Annotated with NCC, NRMSE, and best iteration number
+- Saved to `<sandbox_dir>/visualization/` and the snapshot directory
 
-### 2. 使用脚本批量运行 (`run.sh`)
+### Structural Validation
 
-仓库根目录提供了一个简单脚本：
+After each code merge, an AST-based validator detects and auto-fixes:
+- **Nested class definitions** (class inside class) -> flattened
+- **Orphaned methods** (`self` parameter at module scope) -> moved into class
+- **Duplicate class definitions** -> merged
 
-```bash
-#! /bin/bash
-python -m run_task --task-filter sim > reports/log/run_task_sim.log 2>&1 &
-```
-
-- 含义：
-  - 在后台运行 `python -m run_task --task-filter sim`；
-  - 将标准输出和标准错误一起重定向到 `reports/log/run_task_sim.log`；
-  - `&` 表示在后台运行，不阻塞当前终端。
-- 使用方式：
-
-```bash
-chmod +x run.sh        # 首次运行可能需要赋予执行权限
-bash run.sh            # 或 ./run.sh
-tail -f reports/log/run_task_sim.log   # 实时查看日志
-```
-
-> 注意：`run.sh` 默认使用的是当前环境的 `python`，如果你希望指定特定环境，可在脚本中将 `python` 换成完整路径，例如 `/home/xxx/miniconda3/envs/agent/bin/python`。
+These are common failure modes when LLMs generate code segments that get merged into existing files.
 
 ---
 
-## 日志与结果查看
+## Task Structure
 
-每个任务在运行时会生成以下几类输出：
+Each task under `data/tasks/<name>/` follows this structure:
 
-- **workflow 日志**  
-  - 位置：`${sandbox_root}/${model_name}/${exp_id}/workflow.log`  
-  - 内容：Agent 决策过程、阶段状态、执行 / 评估日志（包含 solver 的 stdout / stderr）。
-- **阶段快照与中间产物**  
-  - 如：`iter_xxx_solver.py`、`iter_xxx_exec_log.txt`、`iter_xxx_*.json` 等。
-  - 用于回溯每一步生成的代码和评估结果。
-- **整体报告**  
-  - 由 `ExecutionReporter` 在 `reports/` 目录下生成汇总报告（任务成功 / 失败统计、指标等）。
+```
+<task_name>/
+  README.md              # Task description (provided to agents)
+  requirements.txt       # Python dependencies for this task
+  main.py                # Reference implementation (NOT exposed to agents during solving)
+  src/                   # Additional reference source files
+  data/
+    raw_data.npz         # Input measurements/observations
+    meta_data.json       # Physical parameters (wavelength, pixel size, etc.)
+    ground_truth.npz     # Ground truth output for evaluation
+  evaluation/
+    metrics.json         # {"ncc_boundary": 0.85, "nrmse_boundary": 0.5}
+    eval_script.py       # Evaluation script (auto-generated if missing)
+```
+
+**Information boundary**: Agents only see `README.md`, `dataset/` contents (data + metadata), and available packages. The reference implementation (`main.py`, `src/`) is never exposed during the solving process. It is only used post-task for optional skill distillation when `learning_enabled=true`.
 
 ---
 
-## 常见问题（FAQ）
+## Outputs
 
-- **Q：为什么 `nvidia-smi` 看不到任务？**  
-A：当前 pipeline 默认生成的是 CPU 代码（主要依赖 `numpy` 等），只有当 GT / 生成的 `solver.py` 主动使用 `torch.cuda` / `to("cuda")` 等 GPU API 时，进程才会出现在 `nvidia-smi` 中。
-- **Q：如何修改为自己的任务？**  
-A：在 `config/tasks/*.yaml` 中新增条目，指定 `gt_code_path`、`python_path`，以及 `task_description_path`（任务描述 md 文件）或 `paper_markdown_path`（由 LLM 从论文生成任务描述）。
-- **Q：如何切换不同大模型？**  
-A：在 `config/llm.yaml` 中新增 / 修改某个模型配置，然后在命令行通过 `--model` 选择对应 key。
+Each task run produces:
 
+```
+<sandbox_root>/<model_name>/<task_name>_<timestamp>/
+  workflow.log                    # Full agent decision log
+  iter_001_plan.md                # Planner output per iteration
+  iter_001_skeleton.py            # Architect output
+  iter_001_solver.py              # Final solver code
+  iter_001_exec_log.txt           # Execution stdout/stderr
+  iter_001_judge.json             # Judge diagnosis
+  visualization.png               # GT vs output comparison
+  final_success.json / ...        # Final snapshot with metrics
+
+<sandbox_dir>/
+  solver.py                       # Generated solver
+  output.npy                      # Pipeline output (best result)
+  best_output.npy                 # Best intermediate result
+  visualization/                  # Comparison images
+  dataset/                        # Input data (read-only)
+```
+
+Aggregate reports are saved to `reports/`.
+
+---
+
+## Covered Task Domains
+
+The 51 tasks span diverse computational inverse problems:
+
+| Domain | Tasks |
+|--------|-------|
+| **CT Reconstruction** | ct_fan_beam, ct_sparse_view, ct_poisson_lowdose, ct_dual_energy, xray_tooth_gridrec, xray_laminography_tike |
+| **MRI** | mri_sense, mri_grappa, mri_tv, mri_l1_wavelet, mri_pnp_admm, mri_varnet, mri_noncartesian_cs, mri_dynamic_dce, mri_t2_mapping, pnp_mri_reconstruction, diffusion_mri_dti |
+| **Optical / Microscopy** | SSNP_ODT, reflection_ODT, fourier_ptychography, conventional_ptychography, electron_ptychography, fpm_inr_reconstruction, hessian_sim, microscope_denoising, lensless_imaging, light_field_microscope, single_molecule_light_field |
+| **Astronomy** | eht_black_hole_dynamic, eht_black_hole_original, eht_black_hole_tomography, eht_black_hole_feature_extraction_dynamic, eht_black_hole_UQ, exoplanet_imaging, lucky_imaging, shapelet_source_reconstruction |
+| **Spectral / Hyperspectral** | spectral_snapshot_compressive_imaging, mcr_hyperspectral, raman_cell_phenotyping |
+| **Seismic / Acoustic** | seismic_FWI_original, usct_FWI, ultrasound_sos_tomography, photoacoustic_tomography, plane_wave_ultrasound |
+| **Other** | differentiable_deflectometry, confocal-nlos-fk, eit_conductivity_reconstruction, insar_phase_unwrapping, weather_radar_data_assimilation, pet_mlem, xray_ptychography_tike |
