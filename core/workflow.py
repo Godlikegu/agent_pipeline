@@ -2,7 +2,7 @@
 core/workflow.py -- Main pipeline workflow.
 
 Assumes the sandbox is pre-configured with:
-  - dataset/gt_output.npy, dataset/input_data/, dataset/meta_data.json
+  - data/gt_output.npy, data/input_data/, data/meta_data.json
   - eval_script.py
 Starts from task_description -> Planner -> Critic -> Architect -> Coder -> Execute -> Judge.
 Evaluates using NCC (Normalized Cross-Correlation) and NRMSE (Normalized RMSE).
@@ -197,17 +197,26 @@ class PipelineWorkflow(WorkflowBase):
             # ==================== Execution & Judge ====================
             if ticket == "Execution":
                 self._log(">>> [System] Executing...")
-                output_file = os.path.join(self.sandbox_dir, "output.npy")
-                if os.path.exists(output_file):
-                    try:
-                        os.remove(output_file)
-                    except OSError:
-                        pass
+                output_file = os.path.join(self.sandbox_dir, "output.npz")
+                npy_file = os.path.join(self.sandbox_dir, "output.npy")
+                for f in (output_file, npy_file):
+                    if os.path.exists(f):
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
 
                 success, stdout, stderr = run_cmd(self.python_path, self.sandbox_dir, "solver.py", timeout=self.execution_timeout)
 
                 if not success and stderr:
                     success, stdout, stderr = self._quick_fix(success, stdout, stderr)
+
+                # Recover from timeout if solver saved a checkpoint output.npz
+                if not success and "TIMEOUT" in stderr:
+                    if os.path.exists(output_file):
+                        self._log("  Execution timed out, but checkpoint output.npz found. Treating as partial success.")
+                        success = True
+                        stderr = f"TIMEOUT (recovered from checkpoint)\n{stderr}"
 
                 logs = f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
                 self._save_artifact(f"iter_{iter_id}_exec_log.txt", logs)
@@ -216,9 +225,16 @@ class PipelineWorkflow(WorkflowBase):
                 eval_success = False
 
                 if success:
+                    # Backward compat: auto-convert output.npy → output.npz
+                    if not os.path.exists(output_file) and os.path.exists(npy_file):
+                        import numpy as np
+                        arr = np.load(npy_file, allow_pickle=True)
+                        np.savez(output_file, output=arr)
+                        self._log("  Auto-converted output.npy → output.npz (key='output')")
+
                     self._log("  Execution success. Running eval...")
                     self._auto_fix_output_shape()
-                    e_ok, e_out, e_err = run_cmd(self.python_path, self.sandbox_dir, "eval_script.py", args=["output.npy"])
+                    e_ok, e_out, e_err = run_cmd(self.python_path, self.sandbox_dir, "eval_script.py", args=["output.npz"])
                     if e_ok:
                         try:
                             metrics = json.loads(e_out)
@@ -236,21 +252,70 @@ class PipelineWorkflow(WorkflowBase):
                 self._record_round_execution(success, stdout, stderr, metrics)
 
                 if eval_success and metrics:
+                    # Check for missing required metrics — regenerate eval_script if needed
+                    missing = self._detect_missing_metrics(metrics)
+                    if missing:
+                        self._log(f"  [System] Required metrics missing: {missing}")
+                        regen_ok = self._regenerate_eval_script(missing, metrics)
+                        if regen_ok:
+                            # Re-run eval with regenerated script
+                            e_ok, e_out, e_err = run_cmd(self.python_path, self.sandbox_dir, "eval_script.py", args=["output.npz"])
+                            if e_ok:
+                                try:
+                                    metrics = json.loads(e_out)
+                                    self._log(f"  Metrics (after regen): {metrics}")
+                                except Exception:
+                                    self._log(f"  [Eval Error] JSON parse failed after regen: {e_out}")
+                            else:
+                                self._log(f"  [Eval Error] Regenerated script failed: {e_err}")
+
                     passed = self._check_threshold(metrics)
-                    ncc = metrics.get("ncc", -1)
+
+                    # Determine primary metric for best-result tracking
+                    primary_score = self._get_primary_score(metrics)
+
+                    # --- Metric Regression Guard ---
+                    # Only protect good solutions (score >= 0.5). For poor initial solutions,
+                    # exploration is more valuable than preservation.
+                    regression_detected = False
+                    if self.best_primary_score >= 0.5:  # Only apply when we have a working solution
+                        # Detect significant regression: score dropped by >50% or sign flipped
+                        is_regression = False
+                        if self.best_primary_score > 0 and primary_score < self.best_primary_score * 0.5:
+                            is_regression = True  # Positive score dropped by >50%
+                        elif self.best_primary_score > 0 and primary_score < 0:
+                            is_regression = True  # Score flipped from positive to negative
+                        elif self.best_primary_score < 0 and primary_score < self.best_primary_score * 1.5:
+                            is_regression = True  # Negative score got worse by >50%
+
+                        if is_regression:
+                            self._log(f"  REGRESSION: score={primary_score:.4f} << best={self.best_primary_score:.4f} (iter {self.best_iteration}). Reverting to best code.")
+                            regression_detected = True
+                            # Find and restore the best solver code from snapshot
+                            best_solver_path = self._find_best_solver_artifact()
+                            if best_solver_path:
+                                with open(best_solver_path, "r", encoding="utf-8") as bf:
+                                    self.current_code = bf.read()
+                                with open(os.path.join(self.sandbox_dir, "solver.py"), "w", encoding="utf-8") as f:
+                                    f.write(self.current_code)
+                                self._log(f"  Reverted solver.py to iter {self.best_iteration} code.")
+                            logs += (f"\n\nREGRESSION DETECTED: Current score={primary_score:.4f} is much worse "
+                                     f"than best score={self.best_primary_score:.4f} (iter {self.best_iteration}). "
+                                     f"Code has been reverted to the best version. "
+                                     f"Make a SMALL, CONSERVATIVE change to improve upon the best result.")
 
                     # Track best result across iterations
                     if (passed and not self.best_passed) or \
-                       (passed == self.best_passed and ncc > self.best_ncc):
-                        self.best_ncc = ncc
+                       (passed == self.best_passed and primary_score > self.best_primary_score):
+                        self.best_primary_score = primary_score
                         self.best_iteration = iter_id
                         self.best_passed = passed
                         self.best_metrics = metrics.copy()
-                        best_path = os.path.join(self.sandbox_dir, "best_output.npy")
-                        src_path = os.path.join(self.sandbox_dir, "output.npy")
+                        best_path = os.path.join(self.sandbox_dir, "best_output.npz")
+                        src_path = os.path.join(self.sandbox_dir, "output.npz")
                         if os.path.exists(src_path):
                             shutil.copy2(src_path, best_path)
-                            self._log(f"  Best result saved (iter {iter_id}, NCC={ncc:.4f})")
+                            self._log(f"  Best result saved (iter {iter_id}, score={primary_score:.4f})")
 
                     if passed:
                         self._finalize_round(success=True)
@@ -269,6 +334,8 @@ class PipelineWorkflow(WorkflowBase):
                 self._reset_downstream_state(result["ticket_assigned_to"])
                 ticket = result["ticket_assigned_to"]
                 feedback = result
+                # Keep failure_history to maintain context for stuck detection.
+                # The STUCK escalation path (line 161) clears it when appropriate.
                 self.retry_count += 1
 
         self._log("FAILED after max retries.")
@@ -280,16 +347,23 @@ class PipelineWorkflow(WorkflowBase):
         """Load input/output shapes from sandbox dataset."""
         input_shape = None
         output_shape = None
-        dataset_dir = os.path.join(self.sandbox_dir, "dataset")
+        data_dir = os.path.join(self.sandbox_dir, "data")
         try:
-            gt_path = os.path.join(dataset_dir, "gt_output.npy")
-            if os.path.exists(gt_path):
-                gt = np.load(gt_path, allow_pickle=True)
+            # GT files are at sandbox root (not data/) for solver isolation
+            gt_npz_path = os.path.join(self.sandbox_dir, "ground_truth.npz")
+            gt_npy_path = os.path.join(self.sandbox_dir, "gt_output.npy")
+            if os.path.exists(gt_npz_path):
+                gt_npz = np.load(gt_npz_path)
+                first_key = list(gt_npz.keys())[0]
+                output_shape = gt_npz[first_key].shape
+                self._log(f"  GT output shape: {output_shape}")
+            elif os.path.exists(gt_npy_path):
+                gt = np.load(gt_npy_path, allow_pickle=True)
                 output_shape = gt.shape
                 self._log(f"  GT output shape: {output_shape}, dtype: {gt.dtype}")
-            # Scan dataset/ for input .npz and .npy files
-            for fname in sorted(os.listdir(dataset_dir)):
-                fpath = os.path.join(dataset_dir, fname)
+            # Scan data/ for input .npz and .npy files
+            for fname in sorted(os.listdir(data_dir)):
+                fpath = os.path.join(data_dir, fname)
                 if fname.startswith("raw_data") and fname.endswith(".npz"):
                     npz = np.load(fpath)
                     for key in npz.keys():
@@ -308,12 +382,12 @@ class PipelineWorkflow(WorkflowBase):
         return input_shape, output_shape
 
     def _build_data_layout(self) -> str:
-        """Scan sandbox dataset/ and build a human-readable layout string for agent context."""
-        dataset_dir = os.path.join(self.sandbox_dir, "dataset")
+        """Scan sandbox data/ and build a human-readable layout string for agent context."""
+        data_dir = os.path.join(self.sandbox_dir, "data")
         parts = []
 
         # Try data_info.json first (generated by setup_task_sandbox)
-        data_info_path = os.path.join(dataset_dir, "data_info.json")
+        data_info_path = os.path.join(data_dir, "data_info.json")
         if os.path.exists(data_info_path):
             with open(data_info_path, "r", encoding="utf-8") as f:
                 data_info = json.load(f)
@@ -321,40 +395,56 @@ class PipelineWorkflow(WorkflowBase):
                 if fname == "gt_output.npy":
                     continue  # Don't expose GT path to solver
                 if isinstance(info, dict) and "shape" in info:
-                    parts.append(f"dataset/{fname} shape={info['shape']} dtype={info['dtype']}")
+                    parts.append(f"data/{fname} shape={info['shape']} dtype={info['dtype']}")
                 else:
                     for key, kinfo in info.items():
-                        parts.append(f"dataset/{fname} key='{key}' shape={kinfo['shape']} dtype={kinfo['dtype']}")
+                        parts.append(f"data/{fname} key='{key}' shape={kinfo['shape']} dtype={kinfo['dtype']}")
         else:
             # Fallback: scan files
-            for fname in sorted(os.listdir(dataset_dir)):
-                fpath = os.path.join(dataset_dir, fname)
-                if fname in ("gt_output.npy", "gt_key.txt", "data_info.json"):
+            for fname in sorted(os.listdir(data_dir)):
+                fpath = os.path.join(data_dir, fname)
+                if fname in ("gt_output.npy", "gt_key.txt", "data_info.json", "output_keys.json", "gt_keys.json",
+                             "ground_truth.npz", "baseline_reference.npz", "ground_truth.npy"):
                     continue
                 if fname.endswith(".npz") and os.path.isfile(fpath):
                     try:
                         npz = np.load(fpath)
                         for k in npz.keys():
                             arr = npz[k]
-                            parts.append(f"dataset/{fname} key='{k}' shape={arr.shape} dtype={arr.dtype}")
+                            parts.append(f"data/{fname} key='{k}' shape={arr.shape} dtype={arr.dtype}")
                     except Exception:
-                        parts.append(f"dataset/{fname}")
+                        parts.append(f"data/{fname}")
                 elif os.path.isfile(fpath):
-                    parts.append(f"dataset/{fname}")
+                    parts.append(f"data/{fname}")
 
-        meta_path = os.path.join(dataset_dir, "meta_data.json")
+        meta_path = os.path.join(data_dir, "meta_data.json")
         if os.path.exists(meta_path):
             try:
                 with open(meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f)
                 meta_summary = ", ".join(f"{k}={v}" for k, v in meta.items()
                                          if k != "description")
-                parts.append(f"dataset/meta_data.json ({meta_summary})")
+                parts.append(f"data/meta_data.json ({meta_summary})")
             except Exception:
-                parts.append("dataset/meta_data.json (physical parameters)")
+                parts.append("data/meta_data.json (physical parameters)")
         if not parts:
-            parts.append("No data files found in dataset/")
-        layout = "; ".join(parts) + ". Save output to output.npy"
+            parts.append("No data files found in data/")
+        # Append output format from output_keys.json if available
+        ok_path = os.path.join(data_dir, "output_keys.json")
+        if os.path.exists(ok_path):
+            try:
+                with open(ok_path, "r", encoding="utf-8") as f:
+                    ok_info = json.load(f)
+                save_instr = ok_info.get("save_instruction", "np.savez('output.npz', output=result)")
+                key_descs = []
+                for kn, ki in ok_info.get("keys", {}).items():
+                    key_descs.append(f"'{kn}' shape={ki.get('shape','?')} dtype={ki.get('dtype','float64')}")
+                keys_str = ", ".join(key_descs)
+                layout = "; ".join(parts) + f". OUTPUT FORMAT: {save_instr} — keys: {keys_str}"
+            except Exception:
+                layout = "; ".join(parts) + ". Save output to output.npz using np.savez"
+        else:
+            layout = "; ".join(parts) + ". Save output to output.npz using np.savez('output.npz', output=result)"
         self._log(f"  Data layout: {layout}")
         return layout
 
@@ -520,6 +610,17 @@ class PipelineWorkflow(WorkflowBase):
         self.failure_history.append(record)
         return False
 
+    def _find_best_solver_artifact(self):
+        """Find the solver.py artifact from the best iteration in the snapshot dir."""
+        if self.best_iteration <= 0:
+            return None
+        # Artifact naming: {exp_id}_iter_{N}_solver.py
+        pattern = f"_iter_{self.best_iteration}_solver.py"
+        for fname in os.listdir(self.snapshot_dir):
+            if fname.endswith(pattern):
+                return os.path.join(self.snapshot_dir, fname)
+        return None
+
     def _quick_fix(self, success, stdout, stderr):
         patterns = [
             ("can only convert an array of size 1", "Replace .item() with safe pattern: data = raw.item() if raw.ndim == 0 else raw"),
@@ -548,34 +649,290 @@ class PipelineWorkflow(WorkflowBase):
         return success, stdout, stderr
 
     def _auto_fix_output_shape(self):
+        """Fix output shapes per-key using output_keys.json or GT reference."""
         try:
             import numpy as np
-            out_path = os.path.join(self.sandbox_dir, "output.npy")
-            gt_path = os.path.join(self.sandbox_dir, "dataset", "gt_output.npy")
-            if not (os.path.exists(out_path) and os.path.exists(gt_path)):
+            out_path = os.path.join(self.sandbox_dir, "output.npz")
+            if not os.path.exists(out_path):
                 return
-            pred = np.load(out_path, allow_pickle=True)
-            gt = np.load(gt_path, allow_pickle=True)
-            if pred.shape == gt.shape:
-                return
-            self._log(f"  Shape fix: pred={pred.shape} vs gt={gt.shape}")
-            squeezed = np.squeeze(pred)
-            if squeezed.shape == gt.shape:
-                np.save(out_path, squeezed.astype(np.float64))
-                return
-            if pred.size == gt.size:
-                np.save(out_path, pred.reshape(gt.shape).astype(np.float64))
+
+            # Load output_keys.json for expected shapes
+            ok_path = os.path.join(self.sandbox_dir, "data", "output_keys.json")
+            expected_keys = {}
+            if os.path.exists(ok_path):
+                with open(ok_path, "r", encoding="utf-8") as f:
+                    ok_info = json.load(f)
+                expected_keys = ok_info.get("keys", {})
+
+            # Load GT reference for shape comparison (GT is at sandbox root, not data/)
+            gt_npz_path = os.path.join(self.sandbox_dir, "ground_truth.npz")
+            gt_npy_path = os.path.join(self.sandbox_dir, "gt_output.npy")
+            gt_arrays = {}
+            if os.path.exists(gt_npz_path):
+                gt_npz = np.load(gt_npz_path)
+                gt_arrays = {k: gt_npz[k] for k in gt_npz.keys()}
+            elif os.path.exists(gt_npy_path):
+                gt_arrays = {"output": np.load(gt_npy_path, allow_pickle=True)}
+
+            pred_npz = np.load(out_path)
+            pred_data = {k: pred_npz[k] for k in pred_npz.keys()}
+            changed = False
+
+            for key, arr in pred_data.items():
+                # Determine expected shape from output_keys.json or GT
+                exp_shape = None
+                if key in expected_keys and "shape" in expected_keys[key]:
+                    exp_shape = tuple(expected_keys[key]["shape"])
+                elif key in gt_arrays:
+                    exp_shape = gt_arrays[key].shape
+
+                if exp_shape is None or arr.shape == exp_shape:
+                    continue
+
+                self._log(f"  Shape fix [{key}]: pred={arr.shape} vs expected={exp_shape}")
+                squeezed = np.squeeze(arr)
+                if squeezed.shape == exp_shape:
+                    pred_data[key] = squeezed
+                    changed = True
+                elif arr.size == np.prod(exp_shape):
+                    pred_data[key] = arr.reshape(exp_shape)
+                    changed = True
+
+            if changed:
+                np.savez(out_path, **pred_data)
+                self._log("  Shape fix applied to output.npz")
         except Exception as e:
             self._log(f"  Shape fix error: {e}")
 
+    def _format_eval_thresholds(self) -> str:
+        """Format eval boundaries for Judge context."""
+        eval_boundaries = getattr(self, '_eval_boundaries', {})
+        if eval_boundaries:
+            LOWER_IS_BETTER = ("nrmse", "error", "mae", "fwhm", "lateral", "axial")
+            parts = []
+            for bk, bv in eval_boundaries.items():
+                mk = bk.replace("_boundary_deg", "_deg").replace("_boundary_nm", "_nm").replace("_boundary", "")
+                is_lower = any(kw in bk.lower() for kw in LOWER_IS_BETTER)
+                op = "<=" if is_lower else ">="
+                parts.append(f"{mk} {op} {bv}")
+            return "; ".join(parts)
+        return f"NCC >= {self.min_ncc}, NRMSE <= {self.max_nrmse}"
+
     def _check_threshold(self, metrics: dict) -> bool:
+        """Check all evaluation boundaries, not just NCC/NRMSE."""
+        LOWER_IS_BETTER = ("nrmse", "error", "mae", "fwhm", "lateral", "axial")
+
+        # Use flexible eval_boundaries if available
+        eval_boundaries = getattr(self, '_eval_boundaries', {})
+        if eval_boundaries:
+            matched_count = 0
+            for boundary_key, boundary_val in eval_boundaries.items():
+                # Derive metric key from boundary key
+                metric_key = boundary_key.replace("_boundary_deg", "_deg") \
+                                         .replace("_boundary_nm", "_nm") \
+                                         .replace("_boundary", "")
+                metric_val = metrics.get(metric_key)
+
+                # Fuzzy fallback: if exact match fails, try substring matching
+                if metric_val is None:
+                    # Try finding a metric key that contains the derived key or vice versa
+                    for mk, mv in metrics.items():
+                        mk_norm = mk.lower().replace("_vs_ref", "").replace("_", "")
+                        key_norm = metric_key.lower().replace("_", "")
+                        if mk_norm == key_norm or key_norm in mk_norm or mk_norm in key_norm:
+                            metric_val = mv
+                            self._log(f"  [Boundary] Fuzzy matched: '{metric_key}' -> '{mk}'")
+                            break
+
+                if metric_val is None:
+                    self._log(f"  [Boundary] WARN: metric '{metric_key}' not found in eval output, skipping boundary '{boundary_key}'")
+                    continue
+                matched_count += 1
+                try:
+                    metric_val = float(metric_val)
+                    boundary_val = float(boundary_val)
+                except (TypeError, ValueError):
+                    continue
+                # NaN/Inf check: NaN or Inf metric values always fail
+                import math
+                if math.isnan(metric_val) or math.isinf(metric_val):
+                    self._log(f"  FAIL: {metric_key}={metric_val} (NaN/Inf is invalid)")
+                    return False
+                is_lower_better = any(kw in boundary_key.lower() for kw in LOWER_IS_BETTER)
+                if is_lower_better:
+                    if metric_val > boundary_val:
+                        self._log(f"  FAIL: {metric_key}={metric_val:.4f} > {boundary_key}={boundary_val}")
+                        return False
+                else:
+                    if metric_val < boundary_val:
+                        self._log(f"  FAIL: {metric_key}={metric_val:.4f} < {boundary_key}={boundary_val}")
+                        return False
+            self._log(f"  All boundaries passed: {list(eval_boundaries.keys())}")
+            return True
+
+        # Fallback to legacy NCC/NRMSE check
+        import math
         ncc = metrics.get("ncc", 0)
         nrmse = metrics.get("nrmse", float('inf'))
+        try:
+            ncc = float(ncc)
+            nrmse = float(nrmse)
+        except (TypeError, ValueError):
+            return False
+        if math.isnan(ncc) or math.isnan(nrmse) or math.isinf(ncc) or math.isinf(nrmse):
+            self._log(f"  FAIL: NCC={ncc}, NRMSE={nrmse} (NaN/Inf is invalid)")
+            return False
         self._log(f"  NCC={ncc:.4f} (min={self.min_ncc}), NRMSE={nrmse:.4f} (max={self.max_nrmse})")
         return ncc >= self.min_ncc and nrmse <= self.max_nrmse
 
+    def _detect_missing_metrics(self, metrics: dict) -> list:
+        """Check if any required boundary metrics are missing from eval output.
+
+        Returns a list of missing metric keys. Empty list means all present.
+        """
+        eval_boundaries = getattr(self, '_eval_boundaries', {})
+        if not eval_boundaries:
+            return []
+
+        missing = []
+        for boundary_key in eval_boundaries:
+            metric_key = boundary_key.replace("_boundary_deg", "_deg") \
+                                     .replace("_boundary_nm", "_nm") \
+                                     .replace("_boundary", "")
+            metric_val = metrics.get(metric_key)
+
+            # Fuzzy fallback
+            if metric_val is None:
+                for mk, mv in metrics.items():
+                    mk_norm = mk.lower().replace("_vs_ref", "").replace("_", "")
+                    key_norm = metric_key.lower().replace("_", "")
+                    if mk_norm == key_norm or key_norm in mk_norm or mk_norm in key_norm:
+                        metric_val = mv
+                        break
+
+            if metric_val is None:
+                missing.append(metric_key)
+
+        return missing
+
+    def _regenerate_eval_script(self, missing_metrics: list, current_metrics: dict) -> bool:
+        """Regenerate eval_script.py when required metrics are missing.
+
+        Returns True if regeneration succeeded, False otherwise.
+        """
+        self._log(f"  [System] Regenerating eval_script.py (missing metrics: {missing_metrics})")
+
+        try:
+            from agents.sandbox_agents import EvalGenAgent
+
+            eval_gen_agent = EvalGenAgent(self.client, self.model_name)
+
+            # Build context for regeneration
+            import numpy as np
+            data_shape_hint = "N/A"
+            # GT files are at sandbox root (not data/) for solver isolation
+            gt_npz_path = os.path.join(self.sandbox_dir, "ground_truth.npz")
+            gt_npy_path = os.path.join(self.sandbox_dir, "gt_output.npy")
+            if os.path.exists(gt_npz_path):
+                gt_npz = np.load(gt_npz_path)
+                first_key = list(gt_npz.keys())[0]
+                data_shape_hint = f"shape={gt_npz[first_key].shape}, dtype={gt_npz[first_key].dtype} (key='{first_key}')"
+            elif os.path.exists(gt_npy_path):
+                gt = np.load(gt_npy_path, allow_pickle=True)
+                data_shape_hint = f"shape={gt.shape}, dtype={gt.dtype}"
+
+            # Load meta_data if available
+            meta_data = None
+            meta_path = os.path.join(self.sandbox_dir, "data", "meta_data.json")
+            if os.path.exists(meta_path):
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta_data = json.load(f)
+
+            # Extract eval context from task dir if available
+            eval_extra = {}
+            if self.task_dir:
+                from run_task import _extract_eval_context
+                eval_extra = _extract_eval_context(self.task_dir, self.sandbox_dir)
+
+            eval_ctx = {
+                "task_desc": self.task_desc,
+                "data_shape_hint": data_shape_hint,
+                "package_list": self.package_list,
+                "meta_data": meta_data,
+                "eval_thresholds": {"min_ncc": self.min_ncc, "max_nrmse": self.max_nrmse},
+                **eval_extra,
+                "feedback": (
+                    f"CRITICAL: Your previous eval_script.py produced metrics: {current_metrics}, "
+                    f"but the following REQUIRED metrics are MISSING: {missing_metrics}. "
+                    f"The pipeline needs ALL of these metric keys in the JSON output. "
+                    f"Fix the eval_script to compute and output ALL required metrics."
+                ),
+            }
+
+            eval_response = eval_gen_agent.generate(eval_ctx)
+
+            # Parse response
+            from run_task import _parse_eval_agent_response
+            output_keys, eval_code = _parse_eval_agent_response(eval_response)
+
+            if not eval_code or len(eval_code.strip()) < 20:
+                self._log("  [System] Eval script regeneration failed: empty code")
+                return False
+
+            # Save new eval_script.py
+            eval_path = os.path.join(self.sandbox_dir, "eval_script.py")
+            with open(eval_path, "w", encoding="utf-8") as f:
+                f.write(eval_code)
+
+            # Update output_keys.json if new one was generated
+            if output_keys and "keys" in output_keys:
+                ok_path = os.path.join(self.sandbox_dir, "data", "output_keys.json")
+                with open(ok_path, "w", encoding="utf-8") as f:
+                    json.dump(output_keys, f, indent=2)
+
+            self._log("  [System] eval_script.py regenerated successfully")
+            return True
+
+        except Exception as e:
+            self._log(f"  [System] Eval script regeneration error: {e}")
+            return False
+
+    def _get_primary_score(self, metrics: dict) -> float:
+        """Derive a single comparable score from metrics for best-result tracking.
+
+        Uses the first boundary key to determine the primary metric.
+        Higher score = better (for lower-is-better metrics, returns negative).
+        Falls back to NCC if no boundaries are configured.
+        Returns -inf for NaN/Inf values so they never count as "best".
+        """
+        import math
+        LOWER_IS_BETTER = ("nrmse", "error", "mae", "fwhm", "lateral", "axial")
+        eval_boundaries = getattr(self, '_eval_boundaries', {})
+        if eval_boundaries:
+            # Use first boundary key as primary
+            for boundary_key in eval_boundaries:
+                metric_key = boundary_key.replace("_boundary_deg", "_deg") \
+                                         .replace("_boundary_nm", "_nm") \
+                                         .replace("_boundary", "")
+                val = metrics.get(metric_key)
+                if val is not None:
+                    try:
+                        val = float(val)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isnan(val) or math.isinf(val):
+                        return float('-inf')
+                    is_lower_better = any(kw in boundary_key.lower() for kw in LOWER_IS_BETTER)
+                    return -val if is_lower_better else val
+        # Fallback: use NCC
+        fallback = float(metrics.get("ncc", -1))
+        if math.isnan(fallback) or math.isinf(fallback):
+            return float('-inf')
+        return fallback
+
     def _judge(self, logs, metrics, stderr, iter_id) -> dict | None:
         self._log(">>> [Agent] Judge...")
+
         judge_ctx = self._build_context_with_memory(
             base_context={
                 "task_desc": self.task_desc,
@@ -585,7 +942,7 @@ class PipelineWorkflow(WorkflowBase):
                 "data_layout": self.data_layout,
                 "package_list": self.package_list,
                 "plan": getattr(self, 'current_plan', None),
-                "eval_thresholds": f"NCC >= {self.min_ncc}, NRMSE <= {self.max_nrmse}",
+                "eval_thresholds": self._format_eval_thresholds(),
             },
             agent_role="Judge",
             current_ticket="Judge",
@@ -690,10 +1047,10 @@ class PipelineWorkflow(WorkflowBase):
 
     # ---- Trajectory Writing ----
     def _write_trajectories(self, final_outcome: str):
-        """Write all round trajectories to data/<task>/trajectories/<exp_id>.json"""
+        """Write all round trajectories to data/trajectory/<task_name>/<exp_id>.json"""
         paths_cfg = self.config.get("paths", {})
-        traj_root = paths_cfg.get("trajectories_dir", "./data")
-        traj_dir = os.path.join(traj_root, self.task_name, "trajectories")
+        traj_root = paths_cfg.get("trajectories_dir", "./data/trajectory")
+        traj_dir = os.path.join(traj_root, self.task_name)
         os.makedirs(traj_dir, exist_ok=True)
 
         payload = {
@@ -808,7 +1165,39 @@ class PipelineWorkflow(WorkflowBase):
 
     # ---- Visualization ----
     def _generate_visualization(self):
-        """Generate GT vs output comparison images at end of task."""
+        """Generate comparison images at end of task.
+
+        Priority: run task-specific visualize_output.py if it exists,
+        fallback to generic GT-vs-output comparison.
+        """
+        viz_dir = os.path.join(self.sandbox_dir, "visualization")
+        os.makedirs(viz_dir, exist_ok=True)
+
+        # Try task-specific visualization script first
+        viz_script = os.path.join(self.sandbox_dir, "visualize_output.py")
+        if os.path.exists(viz_script):
+            self._log("  [Viz] Running task-specific visualize_output.py...")
+            ok, stdout, stderr = run_cmd(
+                self.python_path, self.sandbox_dir, "visualize_output.py",
+                args=["output.npz"], timeout=120,
+            )
+            if ok:
+                self._log(f"  [Viz] Task-specific visualization completed.")
+                # Copy to snapshot
+                for fname in os.listdir(viz_dir):
+                    if fname.endswith(".png"):
+                        snapshot_viz = os.path.join(self.snapshot_dir, "visualization.png")
+                        shutil.copy2(os.path.join(viz_dir, fname), snapshot_viz)
+                        break
+                return
+            else:
+                self._log(f"  [Viz] Task-specific script failed: {stderr[:300]}. Falling back to generic.")
+
+        # Fallback: generic visualization
+        self._generic_visualization()
+
+    def _generic_visualization(self):
+        """Fallback generic GT vs output comparison images."""
         try:
             import matplotlib
             matplotlib.use('Agg')
@@ -817,25 +1206,40 @@ class PipelineWorkflow(WorkflowBase):
             self._log("  [Viz] matplotlib not available, skipping visualization.")
             return
 
-        output_path = os.path.join(self.sandbox_dir, "output.npy")
-        gt_path = os.path.join(self.sandbox_dir, "dataset", "gt_output.npy")
+        output_path = os.path.join(self.sandbox_dir, "output.npz")
+        # GT files are at sandbox root (not data/) for solver isolation
+        gt_npz_path = os.path.join(self.sandbox_dir, "ground_truth.npz")
+        gt_npy_path = os.path.join(self.sandbox_dir, "gt_output.npy")
 
         if not os.path.exists(output_path):
-            self._log("  [Viz] No output.npy found, skipping.")
+            self._log("  [Viz] No output.npz found, skipping.")
             return
 
         viz_dir = os.path.join(self.sandbox_dir, "visualization")
         os.makedirs(viz_dir, exist_ok=True)
 
         try:
-            pred_data = np.load(output_path, allow_pickle=True)
+            # Load prediction — use first key for generic visualization
+            pred_npz = np.load(output_path)
+            pred_keys = list(pred_npz.keys())
+            if not pred_keys:
+                self._log("  [Viz] output.npz is empty, skipping.")
+                return
+            pred_data = pred_npz[pred_keys[0]]
             if pred_data.dtype == object:
                 pred_data = np.array(pred_data.tolist(), dtype=float)
             pred_data = np.squeeze(pred_data)
 
+            # Load GT reference
             gt_data = None
-            if os.path.exists(gt_path):
-                gt_data = np.load(gt_path, allow_pickle=True)
+            if os.path.exists(gt_npz_path):
+                gt_npz = np.load(gt_npz_path)
+                # Try to match the same key, or use first key
+                gt_key = pred_keys[0] if pred_keys[0] in gt_npz else list(gt_npz.keys())[0]
+                gt_data = gt_npz[gt_key]
+            elif os.path.exists(gt_npy_path):
+                gt_data = np.load(gt_npy_path, allow_pickle=True)
+            if gt_data is not None:
                 if gt_data.dtype == object:
                     gt_data = np.array(gt_data.tolist(), dtype=float)
                 gt_data = np.squeeze(gt_data)
@@ -954,12 +1358,14 @@ class PipelineWorkflow(WorkflowBase):
         if self._current_round:
             self._finalize_round(success=False)
         # Restore best result if available
-        best_path = os.path.join(self.sandbox_dir, "best_output.npy")
-        output_path = os.path.join(self.sandbox_dir, "output.npy")
+        best_path = os.path.join(self.sandbox_dir, "best_output.npz")
+        output_path = os.path.join(self.sandbox_dir, "output.npz")
         if os.path.exists(best_path):
             shutil.copy2(best_path, output_path)
+            metrics_str = ", ".join(f"{k}={v:.4f}" if isinstance(v, (int, float)) else f"{k}={v}"
+                                     for k, v in (self.best_metrics or {}).items())
             self._log(f"  Restored best result from iter {self.best_iteration} "
-                      f"(NCC={self.best_ncc:.4f})")
+                      f"({metrics_str})")
         self._generate_visualization()
         self._write_trajectories("failure")
         self._post_task_skills_analysis("failure")

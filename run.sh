@@ -7,11 +7,11 @@ set -euo pipefail
 # Output: Generated solver code + evaluation results + reports
 # ============================================================
 
-PYTHON_BIN="${PYTHON_BIN:-/home/guyuxuan/.conda/envs/agent/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 LLM_CONFIG_PATH="${LLM_CONFIG_PATH:-config/llm.yaml}"
-MODEL_NAME="${MODEL_NAME:-cds/Claude-4.6-opus}"
-TASK_CONFIG="${TASK_CONFIG:-config/tasks/debug_tasks.yaml}"
-TASK_FILTER="${TASK_FILTER:-ptyrad}"
+MODEL_NAME="${MODEL_NAME:-Vendor2/Claude-4.6-opus}"
+TASK_CONFIG="${TASK_CONFIG:-config/tasks/auto_tasks.yaml}"
+TASK_FILTER="${TASK_FILTER:-}"
 CONFIG_OVERRIDE="${CONFIG_OVERRIDE:-}"
 
 CMD=("${PYTHON_BIN}" -m run_task
@@ -30,3 +30,8 @@ echo "Task filter : ${TASK_FILTER:-all}"
 echo "==============="
 
 "${CMD[@]}"
+
+
+
+
+python -m run_task --task-config "config/tasks/nonstandard_tasks.yaml" --llm-config "config/llm.yaml" --model "gemini-3.1-pro-preview" --task-filter "seismic_FWI_original"

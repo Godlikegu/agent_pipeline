@@ -54,7 +54,7 @@ class CoderAgent(BaseAgent):
                 3. Type Safety: Explicitly handle dtype conversions (e.g., `.float()` for float32 consistency)
                 4. NEVER output the entire file - ONLY the modified segment matching the target type.
                 5. **MANDATORY**: You MUST write the actual implementation logic. DO NOT return `pass` or `TODO` comments. You are the IMPLEMENTER. Replace existing `pass` with real code.
-                6. **DATA FILES**: Load input data from `dataset/` directory (e.g., `np.load('dataset/raw_data.npz')` and access keys). Load physical parameters from `dataset/meta_data.json`. Save the final reconstruction to `output.npy`. Do NOT assume any files exist outside `dataset/`.
+                6. **DATA FILES**: Load input data from `data/` directory (e.g., `np.load('data/raw_data.npz')` and access keys). Load physical parameters from `data/meta_data.json`. Save the final result to `output.npz` using `np.savez` — the exact save call and key names are given in the data_layout context. Do NOT assume any files exist outside `data/`.
                 7. **SELF-CONTAINED**: Your code must be fully self-contained. Do NOT import from local project files. Only use installed pip packages and standard library.
                 8. **__init__ IMPLEMENTATION**: When implementing __init__, you MUST set all instance variables. NEVER leave __init__ with just `pass`.
                 9. **API COMPATIBILITY**: When using library functions/classes, do NOT pass keyword arguments you are unsure about. Use only well-documented, standard parameters. If a function call fails with 'unexpected keyword argument', remove that kwarg. Wrap risky API calls in try/except and have a working fallback.
@@ -119,14 +119,26 @@ class CoderAgent(BaseAgent):
 
         # 构建任务描述
         if target_type == 'function':
-            task_desc = f"Implement the function `{target_name}`"
+            if target_name and target_name.lower() in ('solve', 'run', 'optimize', 'reconstruct'):
+                task_desc = (
+                    f"Implement the function `{target_name}`. "
+                    "This is an optimization/solver function: save output.npz periodically during the loop. "
+                    "Do NOT add time.time() budget checks. Use only ASCII characters in print statements."
+                )
+            else:
+                task_desc = f"Implement the function `{target_name}`"
         elif target_type == 'class':
             task_desc = f"Implement the class `{target_name}`"
         elif target_type == 'imports':
             task_desc = "Replace ONLY the import statements at the top of the file"
         elif target_type == 'main_block':
-            data_layout = context.get('data_layout', 'dataset/raw_data.npz (input), dataset/meta_data.json (parameters)')
-            task_desc = f"Replace ONLY the code inside `if __name__ == '__main__':` block. Data layout: {data_layout}. SAVE result to `output.npy`."
+            data_layout = context.get('data_layout', 'data/raw_data.npz (input), data/meta_data.json (parameters)')
+            task_desc = (
+                f"Replace ONLY the code inside `if __name__ == '__main__':` block. Data layout: {data_layout}. "
+                "SAVE result to `output.npz` using the exact np.savez call given in the data_layout above. "
+                "Also save output.npz periodically inside the optimization loop (every N iterations). "
+                "Do NOT add time.time() budget checks. Use only ASCII characters in print statements."
+            )
 
         else:
             data_layout = context.get('data_layout', '')
@@ -162,7 +174,7 @@ class CoderAgent(BaseAgent):
                 shape_section += f"- Input data shape: {input_shape}\n"
             if output_shape:
                 shape_section += f"- Output MUST have shape: {output_shape} (match ground truth EXACTLY)\n"
-                shape_section += f"- If your result has a different shape, RESIZE/RESHAPE it to {output_shape} before np.save('output.npy', result)\n"
+                shape_section += f"- If your result has a different shape, RESIZE/RESHAPE it to {output_shape} before saving to output.npz\n"
 
         return f"""Package Dependencies Available:
 {package_list}
@@ -183,7 +195,7 @@ Task: {task_desc}
 
 Output ONLY the exact code segment to replace/insert - nothing else.
 CRITICAL REMINDERS:
-- Data layout: {context.get('data_layout', 'dataset/raw_data.npz for input, dataset/meta_data.json for parameters')}. Save final result to `output.npy`.
+- Data layout: {context.get('data_layout', 'data/raw_data.npz for input, data/meta_data.json for parameters')}. Save final result to `output.npz` using np.savez (exact call in data_layout above).
 - Only use files listed in the data layout above. Do NOT assume other files exist.
 - __init__ MUST have real implementation with self.xxx = ... (NEVER just pass).
 - All numerical arrays should be np.float64 or np.float32 (avoid object arrays).

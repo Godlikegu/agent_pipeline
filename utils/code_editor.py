@@ -165,7 +165,14 @@ class CodeEditor:
     @staticmethod
     def replace_main_block(source_code: str, new_main_block: str) -> str:
         """
-        替换 if __name__ == "__main__": 模块
+        替换 if __name__ == "__main__": 模块.
+        
+        Ensures the result always has a proper `if __name__ == "__main__":` guard.
+        Handles cases where:
+        - The LLM output already includes the guard
+        - The LLM output is just the body (needs wrapping)
+        - The source code has no existing main block (append)
+        - The source code has an existing main block (replace)
         """
         try:
             tree = ast.parse(source_code)
@@ -174,7 +181,6 @@ class CodeEditor:
             # 寻找 if __name__ == "__main__":
             for node in tree.body:
                 if isinstance(node, ast.If):
-                    # 检查条件是否是 __name__ == "__main__"
                     try:
                         if (isinstance(node.test, ast.Compare) and 
                             isinstance(node.test.left, ast.Name) and 
@@ -186,17 +192,39 @@ class CodeEditor:
                     except:
                         continue
             
-            if not main_node:
-                # 如果没有 main block，直接追加到文件末尾
-                return source_code.strip() + "\n\n" + new_main_block
+            # Normalize the new main block: ensure it has `if __name__` guard
+            new_main_block = new_main_block.strip()
+            new_main_block = new_main_block.expandtabs(4)
             
-            # 替换逻辑
+            # Check if the LLM already included the guard
+            has_guard = False
+            for line in new_main_block.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("if __name__") and "__main__" in stripped:
+                    has_guard = True
+                    break
+            
+            if not has_guard:
+                # The LLM only generated the body — wrap it in the guard
+                # First dedent to find the minimum indentation
+                dedented_body = textwrap.dedent(new_main_block)
+                # Re-indent with 4 spaces (standard Python indent inside if block)
+                indented_body = textwrap.indent(dedented_body, "    ")
+                new_main_block = 'if __name__ == "__main__":\n' + indented_body
+            else:
+                # LLM included the guard — dedent to top level to normalize
+                new_main_block = textwrap.dedent(new_main_block)
+            
+            if not main_node:
+                # No existing main block — append to end
+                return source_code.rstrip() + "\n\n\n" + new_main_block + "\n"
+            
+            # Replace existing main block
             lines = source_code.splitlines(keepends=True)
             start_index = main_node.lineno - 1
             
-            # main block 通常是文件的最后部分，直接替换 start_index 之后的所有内容即可
-            # 这样比较安全，防止遗漏
-            return "".join(lines[:start_index]) + "\n" + new_main_block
+            # main block is typically the last part of the file
+            return "".join(lines[:start_index]).rstrip() + "\n\n\n" + new_main_block + "\n"
             
         except Exception as e:
             print(f"[CodeEditor] Main block replace failed: {e}")

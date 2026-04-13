@@ -4,8 +4,8 @@ tests/output/
 tests/_tmp/
 prompt_optimizer/optimized_prompts/
 artifacts/
-tests/
 skills/library/
 data/
 .claude/
 test_conda_envs/
+plan_test/

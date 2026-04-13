@@ -40,6 +40,6 @@ def create_skill_manager(config: dict, client=None, model_name: str = "") -> obj
         "embedding_model_dir": paths_cfg.get(
             "skills_embedding_model_dir", "./skills/embeddings/all-MiniLM-L6-v2"
         ),
-        "trajectories_dir": paths_cfg.get("trajectories_dir", "./data"),
+        "trajectories_dir": paths_cfg.get("trajectories_dir", "./data/trajectory"),
     }
     return FileSkillManager(client=client, model_name=model_name, config=merged)

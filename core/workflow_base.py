@@ -2,7 +2,7 @@
 core/workflow_base.py -- Pipeline workflow base class.
 
 Assumes the sandbox is already set up with:
-  - dataset/gt_output.npy, dataset/input_data/, dataset/meta_data.json
+  - data/gt_output.npy, data/input_data/, data/meta_data.json
   - eval_script.py
 The workflow starts from task_description and uses skills for generation.
 """
@@ -95,17 +95,21 @@ class WorkflowBase:
         self.max_nrmse = eval_cfg.get("max_nrmse", 0.5)
 
         # Per-task thresholds override global config
+        self._eval_boundaries = {}
         if eval_thresholds:
             if "min_ncc" in eval_thresholds:
                 self.min_ncc = eval_thresholds["min_ncc"]
             if "max_nrmse" in eval_thresholds:
                 self.max_nrmse = eval_thresholds["max_nrmse"]
+            if "eval_boundaries" in eval_thresholds:
+                self._eval_boundaries = eval_thresholds["eval_boundaries"]
 
         self.top_k_planner = retrieval_cfg.get("top_k_planner", 3)
         self.top_k_coder = retrieval_cfg.get("top_k_coder", 4)
 
-        # Best NCC tracking across iterations
-        self.best_ncc = -1.0
+        # Best result tracking across iterations
+        self.best_primary_score = -float('inf')
+        self.best_ncc = -1.0  # backward compat
         self.best_iteration = 0
         self.best_passed = False
         self.best_metrics = {}

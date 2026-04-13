@@ -78,7 +78,7 @@ ROOT CAUSES:
 2. ALWAYS verify implementation fidelity BEFORE blaming Planner.
 3. For shape errors: Check if error occurs at method CALL site (Coder) vs method SIGNATURE (Architect).
 4. If the SAME error has been repeating for multiple iterations, suggest a DIFFERENT approach (e.g., escalate from Coder to Planner for algorithm change).
-5. If code references external files that don't exist (.tif, .yaml, .h5, .csv), tell Coder to load data ONLY from `dataset/` directory (e.g., `dataset/raw_data.npz`) and `dataset/meta_data.json`.
+5. If code references external files that don't exist (.tif, .yaml, .h5, .csv), tell Coder to load data ONLY from `data/` directory (e.g., `data/raw_data.npz`) and `data/meta_data.json`.
 6. If __init__ is empty or unimplemented, assign to Coder with fix_target="__init__".
 7. **PATTERN-WIDE FIXES**: When a runtime error is caused by a specific API usage pattern (e.g., wrong argument type, unsupported parameter combination), SEARCH THE ENTIRE CODE for ALL occurrences of that same pattern across ALL functions. List EVERY affected function in fix_target, not just the one that crashed first. The crash site is only the first occurrence — the same bug likely exists elsewhere in the code.
 8. **JSON FORMAT**: Your output MUST be valid JSON. Do NOT include unescaped newlines, tabs, or special characters inside JSON string values. Use \\n for newlines within strings. Keep string values concise and on a single logical line where possible.

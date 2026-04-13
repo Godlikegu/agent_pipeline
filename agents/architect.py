@@ -28,10 +28,10 @@ class ArchitectAgent(BaseAgent):
                 Imports: All imports at the top.
                 Solver Class: class InverseSolver:
                 Main: if __name__ == "__main__":
-                      - Load input data from `dataset/` (e.g., np.load('dataset/raw_data.npz') and access keys)
-                      - Load physical parameters from `dataset/meta_data.json`
+                      - Load input data from `data/` (e.g., np.load('data/raw_data.npz') and access keys)
+                      - Load physical parameters from `data/meta_data.json`
                       - Must include `solver.solve(...)`
-                      - Must include `np.save('output.npy', result)`
+                      - Must include `np.savez('output.npz', ...)` with keys from data layout
 
                 Output Format:
                 ```python
@@ -45,12 +45,12 @@ class ArchitectAgent(BaseAgent):
                 if __name__ == "__main__":
                     # Load Data
                     # import json
-                    # with open('dataset/meta_data.json') as f: meta = json.load(f)
-                    # raw = np.load('dataset/raw_data.npz')
+                    # with open('data/meta_data.json') as f: meta = json.load(f)
+                    # raw = np.load('data/raw_data.npz')
                     # input_data = raw[list(raw.keys())[0]]
                     # ...
                     # result = solver.solve(input_data)
-                    # np.save('output.npy', result)
+                    # np.savez('output.npz', result_key=result)  # use key name from data layout
                     pass
                 ```
                 """

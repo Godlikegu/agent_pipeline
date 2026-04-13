@@ -161,7 +161,7 @@ Source Tasks: {new_skill.get('source_tasks', [])}
 
 Output ONLY valid JSON -- no markdown, no explanation."""
 
-        return self.call_llm(prompt, temperature=0.2, max_tokens=4000, max_loops=1)
+        return self.call_llm(prompt, temperature=0.2, max_tokens=32768, max_loops=1)
 
     @staticmethod
     def parse_skills_output(raw: str) -> list:

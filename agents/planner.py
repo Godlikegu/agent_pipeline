@@ -20,7 +20,7 @@ class PlannerAgent(BaseAgent):
                 - For non-linear/complex priors: Consider Deep Unrolling (Algorithm Unrolling) or End-to-End CNNs (UNet/ResNet).
                 - *Constraint*: Prefer stability and standard implementation over experimental papers.
                 3. **Dimensionality Awareness**: Mentally check the input and output shapes. If Input is (B, C, H, W), ensure the operations preserve or transform dimensions correctly.
-                4. **Self-Contained**: The solution must only use files from `dataset/` directory for input data and `dataset/meta_data.json` for physical parameters. For `.npz` files, load with `np.load()` and access the correct key. No external files (.tif, .yaml, .h5, .csv, .mat) should be assumed. The data layout and available packages will be provided in the context.
+                4. **Self-Contained**: The solution must only use files from `data/` directory for input data and `data/meta_data.json` for physical parameters. For `.npz` files, load with `np.load()` and access the correct key. No external files (.tif, .yaml, .h5, .csv, .mat) should be assumed. The data layout and available packages will be provided in the context.
                 5. **Simplicity First**: Prefer well-understood classical algorithms that are straightforward to implement in <200 lines of Python. Avoid complex deep learning architectures unless explicitly needed.
                 6. **Hyperparameter Scale Awareness**:
                    - Check meta_data.json for output scale hints.
