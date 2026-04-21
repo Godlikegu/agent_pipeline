@@ -165,7 +165,7 @@ def main():
         help="Write task configs with python_path to YAML file"
     )
 
-    # --- Legacy support for clean_code.sh flat args ---
+    # --- Legacy support for deprecated flat arguments ---
     # If the first arg looks like a legacy flag, redirect to full pipeline
     if len(sys.argv) > 1 and sys.argv[1] in ("--github-url", "--local-repo", "--task-family",
                                                 "--sandbox-root", "--llm-enabled", "--llm-required",
