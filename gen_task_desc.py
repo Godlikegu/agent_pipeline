@@ -4,8 +4,8 @@ gen_task_desc.py — Generate task description from user prompt and optional sou
 Usage:
     python -m gen_task_desc \
         --user-prompt "Implement a sparse deconvolution algorithm" \
-        --paper-markdown-path /data/paper.md \
-        --cleaned-code-path /data/code_cleaned.py \
+        --paper-markdown-path ./data/paper_markdown/example.md \
+        --cleaned-code-path ./artifacts/code_cleaner/example/code_cleaned.py \
         --output-path ./data/task_descriptions/my_task.md
 """
 from __future__ import annotations
@@ -39,7 +39,7 @@ def main() -> int:
     parser.add_argument("--config", default=None, help="Override config YAML")
     parser.add_argument("--llm-config",
                         default=str(Path(__file__).resolve().parent / "config" / "llm.yaml"))
-    parser.add_argument("--model", default="cds/Claude-4.6-opus")
+    parser.add_argument("--model", default="example/default-model")
     args = parser.parse_args()
 
     config = load_config(args.config)

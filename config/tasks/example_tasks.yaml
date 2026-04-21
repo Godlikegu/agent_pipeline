@@ -1,0 +1,5 @@
+tasks:
+  - name: example_inverse_problem
+    python_path: ./test_conda_envs/task_example_inverse_problem/<python-binary>
+    task_description_path: ./data/tasks/example_inverse_problem/README.md
+    task_dir: ./data/tasks/example_inverse_problem

@@ -1,44 +1,28 @@
-# =============================================================================
-# skill_pipeline 统一配置文件
-# 所有路径、阈值、magic number 集中在此，不要在代码中硬编码。
-# =============================================================================
-
-# ========== 路径配置 ==========
 paths:
-  # ---- 输入路径 ----
-  paper_pdf_dir: "/data/guyuxuan/agent/paper_pdf"
-  paper_markdown_dir: "/data/guyuxuan/agent/paper_md"
-
-  # ---- 中间产物 / 工作目录 ----
+  paper_pdf_dir: "./data/paper_pdf"
+  paper_markdown_dir: "./data/paper_markdown"
   sandbox_root: "./data/end_sandbox"
   code_cleaner_workdir: "./artifacts/code_cleaner"
-
-  # ---- 输出路径 ----
   task_descriptions_dir: "./data/task_descriptions"
   reports_dir: "./reports"
-
-  # ---- Skills 存储路径 ----
   skills_active_dir: "./.claude/skills"
   skills_draft_dir: "./skills/library/drafts"
   skills_registry: "./skills/library/registry.json"
   skills_code_pool: "./skills/library/code_pool"
   skills_embedding_model_dir: "./skills/embeddings/all-MiniLM-L6-v2"
-  trajectories_dir: "./data"                     # 轨迹存储根目录: data/<task>/trajectories/
+  trajectories_dir: "./data/trajectories"
 
-# ========== Pipeline 参数 ==========
 pipeline:
-  max_retries: 5                     # 主循环最大重试次数
-  execution_timeout: 1800             # solver 执行超时（秒）
-  syntax_check_timeout: 30           # 语法检查超时（秒）
-  max_history_len: 3                 # 保留失败历史条数
-  code_size_guard: 12000             # 代码膨胀上限（字符数）
+  max_retries: 5
+  execution_timeout: 1800
+  syntax_check_timeout: 30
+  max_history_len: 3
+  code_size_guard: 12000
 
-# ========== 评估阈值 ==========
 evaluation:
-  min_ncc: 0.85                      # NCC >= 0.85 通过
-  max_nrmse: 0.5                     # NRMSE <= 0.5 通过
+  min_ncc: 0.85
+  max_nrmse: 0.5
 
-# ========== Code Cleaner ==========
 code_cleaner:
   llm_enabled: true
   llm_required: true
@@ -46,43 +30,42 @@ code_cleaner:
   llm_max_tokens: 16000
   llm_max_loops: 3
   force_rebuild_env: false
-  data_gen_timeout: 180              # 数据/测试脚本生成执行超时（秒）
-  data_gen_max_retries: 5            # 数据生成最大重试
-  gt_code_snippet_limit: 4000        # GT 代码截取字符数
+  data_gen_timeout: 180
+  data_gen_max_retries: 5
+  gt_code_snippet_limit: 4000
   env_setup:
-    conda_path: null                   # null = 自动检测
-    envs_dir: "./test_conda_envs"      # 环境存放目录（--prefix 模式）
+    conda_path: null
+    envs_dir: "./test_conda_envs"
     python_version: "3.10"
-    env_prefix: "task_"                # 环境命名前缀: task_<folder_name>
-    max_fix_retries: 3                 # LLM 诊断修复最大轮次
-    pip_install_timeout: 600           # pip install 超时（秒）
-    verify_timeout: 30                 # import 验证超时（秒）
-    torch_cuda_index_url: "https://download.pytorch.org/whl/cu124"  # PyTorch CUDA wheel index
+    env_prefix: "task_"
+    max_fix_retries: 3
+    pip_install_timeout: 600
+    verify_timeout: 30
+    torch_cuda_index_url: "https://download.pytorch.org/whl/cu124"
 
-# ========== Skills 系统 ==========
 skills:
-  retrieval_enabled: false              # 只读开关：允许检索已有 skills（default=true）
-  learning_enabled: false              # 可写开关：允许从轨迹学习（default=false，implies retrieval_enabled=true）
+  enabled: false
+  retrieval_enabled: false
+  learning_enabled: false
   retrieval:
-    max_token_budget: 10000          # 检索 token 预算上限（增大以确保所有相关 skills 能被注入）
-    similarity_threshold: 0.05       # 注入的相似度门槛（embedding cosine sim，降低以确保检索覆盖；TF-IDF fallback scores are 0.05-0.15）
-    max_items: 12                    # 最多注入条数（提高以容纳更多specific skills）
-    top_k_planner: 10                # Planner agent 检索条数
-    top_k_coder: 10                  # Coder agent 检索条数
-    max_permanent: 5                 # 永久化 skills 最多检索条数
-    max_draft: 12                    # draft skills 最多检索条数
+    max_token_budget: 10000
+    similarity_threshold: 0.05
+    max_items: 12
+    top_k_planner: 10
+    top_k_coder: 10
+    max_permanent: 5
+    max_draft: 12
   learning:
-    merge_similarity_threshold: 0.55 # 相似 skills 合并阈值（降低以捕获更多语义重复）
-    max_skills_per_distillation: 6   # 单次蒸馏最大 skills 数（提高以捕获更多specific knowledge）
+    merge_similarity_threshold: 0.55
+    max_skills_per_distillation: 6
   generator:
-    temperature: 0.3                 # skills_generator agent 温度
-    max_tokens: 16000                # skills_generator agent max_tokens
-    max_loops: 3                     # skills_generator agent 续写循环
+    temperature: 0.3
+    max_tokens: 16000
+    max_loops: 3
   embedding:
     model_name: "all-MiniLM-L6-v2"
     dimension: 384
 
-# ========== Agent 参数 ==========
 agents:
   planner:
     temperature: 0.7
@@ -99,9 +82,8 @@ agents:
   judge:
     temperature: 0.7
 
-# ========== Task Description 生成 ==========
 task_gen:
-  default_user_prompt: "Generate a detailed task_description for the scientific coding pipeline. Use the required user prompt as the primary source of truth, and incorporate any available paper markdown, cleaned code, README, configs, and tests into a clear implementation-ready specification."
+  default_user_prompt: "Generate a detailed task description for the scientific coding pipeline. Use the required user prompt as the primary source of truth, and incorporate any available paper markdown, cleaned code, README, configs, and tests into a clear implementation-ready specification."
   paper_markdown_char_limit: 40000
   generator:
     system_prompt_path: "./agents/prompts/task_generator_system.txt"

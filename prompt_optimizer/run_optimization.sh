@@ -1,16 +1,5 @@
 #!/usr/bin/env bash
 # Run prompt optimization for the task generator.
-# Usage:
-#   ./run_optimization.sh [OPTIONS]
-#
-# Required: --paper-dir, --ground-truth-dir, --models, --optimizer-model
-#
-# Example:
-#   ./run_optimization.sh \
-#     --paper-dir ./data/paper_markdown \
-#     --ground-truth-dir ./data/ground_truth_descriptions \
-#     --models "cds/Claude-4.6-opus" \
-#     --optimizer-model "cds/Claude-4.6-opus"
 
 set -euo pipefail
 
@@ -19,12 +8,11 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 cd "$PROJECT_ROOT"
 
-# Default paths (override with env or args)
-PAPER_DIR="${PAPER_DIR:-/data/guyuxuan/agent/paper_md}"
-GROUND_TRUTH_DIR="${GROUND_TRUTH_DIR:-/data/guyuxuan/agent/gt_task_desc}"
+PAPER_DIR="${PAPER_DIR:-$PROJECT_ROOT/data/paper_markdown}"
+GROUND_TRUTH_DIR="${GROUND_TRUTH_DIR:-$PROJECT_ROOT/data/ground_truth_descriptions}"
 LLM_CONFIG="${LLM_CONFIG:-$PROJECT_ROOT/config/llm.yaml}"
-MODELS="${MODELS:-cds/Claude-4.6-opus}"
-OPTIMIZER_MODEL="${OPTIMIZER_MODEL:-cds/Claude-4.6-opus}"
+MODELS="${MODELS:-example/default-model}"
+OPTIMIZER_MODEL="${OPTIMIZER_MODEL:-example/default-model}"
 OUTPUT_DIR="${OUTPUT_DIR:-$SCRIPT_DIR/optimized_prompts}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 EPOCHS="${EPOCHS:-20}"

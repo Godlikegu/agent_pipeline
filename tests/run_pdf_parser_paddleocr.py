@@ -1,6 +1,7 @@
-"""将 /data/guyuxuan/agent/paper_pdf 下的 PDF 转为 Markdown，输出到 /data/guyuxuan/agent/paper_md。"""
+"""Convert local PDFs into Markdown using the PaddleOCR parser."""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -10,11 +11,15 @@ def main() -> int:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-    pdf_dir = Path("/data/guyuxuan/agent/paper_pdf").expanduser().resolve()
-    out_dir = Path("/data/guyuxuan/agent/paper_md").expanduser().resolve()
+    pdf_dir = Path(
+        os.environ.get("PDF_INPUT_DIR", repo_root / "data" / "paper_pdf")
+    ).expanduser().resolve()
+    out_dir = Path(
+        os.environ.get("MARKDOWN_OUTPUT_DIR", repo_root / "data" / "paper_markdown")
+    ).expanduser().resolve()
 
     if not pdf_dir.exists():
-        print(f"[ERROR] PDF 目录不存在: {pdf_dir}")
+        print(f"[ERROR] PDF directory not found: {pdf_dir}")
         return 2
 
     try:
@@ -28,13 +33,13 @@ def main() -> int:
             force=True,
         )
     except ImportError as e:
-        print("[ERROR] 未安装 paddleocr，无法使用 PaddleOCR 后端。")
-        print(f"        详细错误: {e}")
-        print("\n你可以尝试在当前环境安装：")
+        print("[ERROR] paddleocr is not installed, so the PaddleOCR backend is unavailable.")
+        print(f"        Import error: {e}")
+        print("\nYou can install it in the current environment with:")
         print("  pip install paddleocr")
         return 3
 
-    print(f"[OK] 共生成 {len(md_paths)} 个 Markdown 文件：")
+    print(f"[OK] Generated {len(md_paths)} Markdown file(s):")
     for p in md_paths:
         print(f"  - {p}")
     return 0

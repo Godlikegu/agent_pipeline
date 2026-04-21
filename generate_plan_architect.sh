@@ -1,15 +1,22 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Run all 7 models x all tasks
-python -m tests.test_plan_architect --temperature 0.5
+PYTHON_BIN="${PYTHON_BIN:-python}"
+LLM_CONFIG_PATH="${LLM_CONFIG_PATH:-config/llm.yaml}"
+TASK_CONFIG="${TASK_CONFIG:-config/tasks/generated_tasks.yaml}"
+OUTPUT_DIR="${OUTPUT_DIR:-plan_test}"
+MODEL_FILTER="${MODEL_FILTER:-}"
+TASK_FILTER="${TASK_FILTER:-}"
 
-# Single model + single task (dry run)
-python -m tests.test_plan_architect --task-filter ct_fan_beam --model-filter gemini-3.1-pro-preview --temperature 0.5
+CMD=(
+  "${PYTHON_BIN}" -m tests.test_plan_architect
+  --llm-config "${LLM_CONFIG_PATH}"
+  --task-config "${TASK_CONFIG}"
+  --output-dir "${OUTPUT_DIR}"
+  --temperature 0.5
+)
 
-# Custom output dir
-python -m tests.test_plan_architect --output-dir my_benchmark --temperature 0.5
+[[ -n "${MODEL_FILTER}" ]] && CMD+=(--model-filter "${MODEL_FILTER}")
+[[ -n "${TASK_FILTER}" ]] && CMD+=(--task-filter "${TASK_FILTER}")
 
-
-python -m tests.test_plan_architect --model-filter Vendor2/GLM-5
-
-
+"${CMD[@]}"

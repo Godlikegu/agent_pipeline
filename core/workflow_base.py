@@ -125,8 +125,9 @@ class WorkflowBase:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.exp_id = f"{self.task_name}_{timestamp}"
 
-        snapshot_root = paths_cfg.get("sandbox_root", "/data/guyuxuan/agent/end_sandbox")
-        self.snapshot_dir = os.path.join(snapshot_root, self.model_name, self.exp_id)
+        snapshot_root = paths_cfg.get("sandbox_root", "./data/end_sandbox")
+        safe_model_name = self.model_name.replace("/", "_").replace("\\", "_")
+        self.snapshot_dir = os.path.join(snapshot_root, safe_model_name, self.exp_id)
         os.makedirs(self.snapshot_dir, exist_ok=True)
         self.log_file = os.path.join(self.snapshot_dir, "workflow.log")
         open(self.log_file, "a").close()

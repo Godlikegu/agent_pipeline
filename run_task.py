@@ -5,7 +5,7 @@ Runs one or more tasks from a YAML task list.
 Supports structured tasks under data/tasks/ with sandbox construction.
 
 Usage:
-    python -m run_task --task-config config/tasks/auto_tasks.yaml --model cds/Claude-4.6-opus
+    python -m run_task --task-config config/tasks/generated_tasks.yaml --model example/default-model
     python -m run_task --task-filter sim,bpm
 """
 import os
@@ -384,7 +384,11 @@ def run_single_task(
     sandbox_dir = task_info.get("sandbox_dir")
     if not sandbox_dir:
         sandbox_root = paths_cfg.get("sandbox_root", "./test_sandbox")
-        sandbox_dir = os.path.join(sandbox_root, f"{task_name}")
+        # Include model_name in sandbox path so different models get isolated sandboxes
+        # This prevents concurrent runs of different models from clobbering each other's
+        # solver.py, output.npz, eval_script.py, etc.
+        safe_model_name = model_name.replace("/", "_").replace("\\", "_")
+        sandbox_dir = os.path.join(sandbox_root, safe_model_name, f"{task_name}")
     sandbox_dir = os.path.abspath(sandbox_dir)
 
     print(f"\n{'='*60}")
@@ -626,10 +630,10 @@ def main():
     parser = argparse.ArgumentParser(description="Run Agentic Pipeline Task")
     parser.add_argument("--config", default=None)
     parser.add_argument("--task-config",
-                        default=str(Path(__file__).parent / "config" / "tasks" / "debug_tasks.yaml"))
+                        default=str(Path(__file__).parent / "config" / "tasks" / "generated_tasks.yaml"))
     parser.add_argument("--llm-config",
                         default=str(Path(__file__).parent / "config" / "llm.yaml"))
-    parser.add_argument("--model", default="Vendor2/Claude-4.6-opus")
+    parser.add_argument("--model", default="example/default-model")
     parser.add_argument("--task-filter", help="Comma-separated task names to run")
     args = parser.parse_args()
 

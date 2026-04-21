@@ -14,6 +14,17 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 
 
+def _to_repo_relative(path_str: str) -> str:
+    """Return a ./relative/path when the target lives inside the repo."""
+    path = Path(path_str).resolve()
+    repo_root = PROJECT_ROOT.resolve()
+    try:
+        rel = path.relative_to(repo_root)
+    except ValueError:
+        return str(path)
+    return f"./{rel.as_posix()}"
+
+
 def run_env_setup(args):
     """Execute the environment setup command."""
     from utils.config_loader import load_config
@@ -77,9 +88,9 @@ def run_env_setup(args):
                 task_dir = os.path.join(tasks_dir, name)
                 tasks_list.append({
                     "name": name,
-                    "python_path": python_path,
-                    "task_dir": task_dir,
-                    "task_description_path": os.path.join(task_dir, "README.md"),
+                    "python_path": _to_repo_relative(python_path),
+                    "task_dir": _to_repo_relative(task_dir),
+                    "task_description_path": _to_repo_relative(os.path.join(task_dir, "README.md")),
                 })
         output = {"tasks": tasks_list}
         output_path = Path(args.output_yaml)
@@ -138,7 +149,7 @@ def main():
         help="Path to LLM config YAML"
     )
     env_parser.add_argument(
-        "--model", default="cds/Claude-4.6-opus",
+        "--model", default="example/default-model",
         help="LLM model key from llm config"
     )
     env_parser.add_argument(

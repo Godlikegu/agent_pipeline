@@ -176,7 +176,7 @@ def run_model(model_key: str, tasks: list, llm_config: dict, output_root: str,
 def main():
     parser = argparse.ArgumentParser(description="Multi-model Plan & Architect benchmark")
     parser.add_argument("--llm-config", default=os.path.join(PROJECT_ROOT, "config", "llm.yaml"))
-    parser.add_argument("--task-config", default=os.path.join(PROJECT_ROOT, "config", "tasks", "all_tasks.yaml"))
+    parser.add_argument("--task-config", default=os.path.join(PROJECT_ROOT, "config", "tasks", "generated_tasks.yaml"))
     parser.add_argument("--output-dir", default=os.path.join(PROJECT_ROOT, "plan_test"))
     parser.add_argument("--task-filter", help="Comma-separated task names")
     parser.add_argument("--model-filter", help="Comma-separated model key substrings")
@@ -202,7 +202,7 @@ def main():
         print("No models selected. Check --model-filter or llm.yaml.")
         sys.exit(1)
     if not tasks:
-        print("No tasks selected. Check --task-filter or auto_tasks.yaml.")
+        print("No tasks selected. Check --task-filter or config/tasks/generated_tasks.yaml.")
         sys.exit(1)
 
     print(f"Models ({len(model_keys)}): {model_keys}")

@@ -7,9 +7,9 @@ set -euo pipefail
 # Output: Markdown directory
 # ============================================================
 
-PYTHON_BIN="${PYTHON_BIN:-/home/yjh/.conda/envs/paddle_env/bin/python}"
-INPUT_DIR="${INPUT_DIR:-/data/guyuxuan/agent/paper_pdf}"
-OUTPUT_DIR="${OUTPUT_DIR:-/data/guyuxuan/agent/paper_md}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+INPUT_DIR="${INPUT_DIR:-./data/paper_pdf}"
+OUTPUT_DIR="${OUTPUT_DIR:-./data/paper_markdown}"
 
 echo "=== pdf2md.sh ==="
 echo "Input  : ${INPUT_DIR}"
